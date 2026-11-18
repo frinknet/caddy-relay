@@ -281,9 +281,13 @@ func (c *Channel) buildReplay() [][]byte {
 	return out
 }
 
-// publish is called from Hub.Publish. It waits for the actor so the returned
-// status describes this message rather than an estimate.
+// publish is called from Hub.Publish with a reservation for len(body) bytes
+// held on the hub. It waits for the actor so the returned status describes
+// this message rather than an estimate, then hands the reservation back: the
+// actor has already moved the message's bytes into retained (minus whatever it
+// trimmed), or kept none of them.
 func (c *Channel) publish(body []byte, exclude SubID) Status {
+	defer c.hub.unreserve(int64(len(body)))
 	reply := make(chan Status, 1)
 	select {
 	case c.inbox <- func() { reply <- c.doPublish(body, exclude) }:

@@ -179,9 +179,11 @@ and `Status.String` returns `true`/`false` for templates that index the result.
 - `Participants`, `Retained` and `Dropped` expose the counters. `Dropped` sums
 the live channels' drop counters.
 - `addRetained` adjusts the memory budget and ignores updates after `Stop`.
-- `reserve(n)` reports whether `n` more bytes fit. It is a soft cap: when over
-  budget it asks each channel to evict itself if idle; concurrent publishes may
-  still overshoot.
+- `reserve(n)` claims `n` bytes of the budget, adding them to `reserved` and
+  checking `retained+reserved` under a compare-and-swap loop, so concurrent
+  publishes cannot overshoot. When over budget it asks each channel to evict
+  itself if idle and retries. `unreserve(n)` gives the claim back once the
+  channel actor has moved the message into `retained` (or kept none of it).
 - `getOrCreate` returns an existing channel or creates one when a rule matches
   and `MaxChannels` is not reached. A name with no matching rule is an error.
 - `matchRule` returns the first matching rule; `Rule` is its lock-free public
@@ -189,9 +191,10 @@ the live channels' drop counters.
 - `Subscribe` gets or creates the channel and forwards to the channel actor.
 - `Publish` walks the requested patterns. A wildcard applies to existing
   channels only; a concrete name is created on demand. Before publishing it
-  reserves the estimated bytes (`len(body)` per target) and reports
+  reserves `len(body)` per target before publishing to it and reports
   `ReasonMemory` when the budget cannot be met, `ReasonUnavailable` when the
-  channel cannot be created. Each target channel returns its own `Status`.
+  channel cannot be created (releasing that reservation). Each target channel
+  returns its own `Status`.
 - `patternMatch` treats a trailing `*` as a prefix match and everything else as
   a literal; `isWildcard` tests for that suffix.
 

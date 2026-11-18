@@ -22,8 +22,12 @@ type Hub struct {
 	log Logger
 
 	// retained is the total bytes held in every channel's ring, maintained by
-	// the channel actors. stopped freezes the accounting during teardown.
+	// the channel actors. reserved is bytes promised to publishes that are
+	// still in flight, so the budget is checked against both and a publish
+	// cannot overshoot max_memory. stopped freezes the accounting during
+	// teardown.
 	retained atomic.Int64
+	reserved atomic.Int64
 	stopped  atomic.Bool
 
 	// participants counts subscribers across all channels. It is only
@@ -143,24 +147,45 @@ func (h *Hub) allChannels() []*Channel {
 	return out
 }
 
-// reserve reports whether n more retained bytes fit in the memory budget,
-// evicting channels that have no participants to make room. max_memory is a
-// soft cap: concurrent publishes can overshoot it.
+// reserve claims n bytes of the memory budget for a publish that is about to
+// run, evicting channels that have no participants to make room. The claim is
+// held in reserved until unreserve, so concurrent publishes are counted
+// against max_memory exactly rather than all passing one stale check.
 func (h *Hub) reserve(n int64) bool {
 	if h.cfg.MaxMemory <= 0 {
 		return true
 	}
-	if h.retained.Load()+n <= h.cfg.MaxMemory {
+	if h.tryReserve(n) {
 		return true
 	}
 	for _, ch := range h.allChannels() {
-		if h.retained.Load()+n <= h.cfg.MaxMemory {
-			break
+		if h.tryReserve(n) {
+			return true
 		}
 		ch.evictIdle()
 	}
-	return h.retained.Load()+n <= h.cfg.MaxMemory
+	return h.tryReserve(n)
 }
+
+// tryReserve adds n to reserved when the budget allows it. Retained bytes only
+// grow while the grower holds a reservation, so checking both counters and
+// committing with a CAS cannot let two publishers through on one slot.
+func (h *Hub) tryReserve(n int64) bool {
+	for {
+		cur := h.reserved.Load()
+		if h.retained.Load()+cur+n > h.cfg.MaxMemory {
+			return false
+		}
+		if h.reserved.CompareAndSwap(cur, cur+n) {
+			return true
+		}
+	}
+}
+
+// unreserve gives a publish's claim back. It runs after the channel actor has
+// adjusted retained, so the retained bytes take over from the claim. Every
+// reserve is matched by exactly one unreserve, so Stop has nothing to reset.
+func (h *Hub) unreserve(n int64) { h.reserved.Add(-n) }
 
 // removeChannel drops c from the registry if it is still the channel
 // registered under its name. Called by the actor once it closes itself.
@@ -245,11 +270,11 @@ func (h *Hub) Publish(ctx context.Context, patterns []string, body []byte, exclu
 			if len(matched) == 0 {
 				continue
 			}
-			if !h.reserve(n * int64(len(matched))) {
-				result[pat] = Status{Reason: ReasonMemory}
-				continue
-			}
 			for _, ch := range matched {
+				if !h.reserve(n) {
+					result[ch.name] = Status{Reason: ReasonMemory}
+					continue
+				}
 				result[ch.name] = ch.publish(body, exclude)
 			}
 		} else {
@@ -259,6 +284,7 @@ func (h *Hub) Publish(ctx context.Context, patterns []string, body []byte, exclu
 			}
 			ch, err := h.getOrCreate(pat)
 			if err != nil {
+				h.unreserve(n)
 				result[pat] = Status{Reason: ReasonUnavailable}
 				continue
 			}

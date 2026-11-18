@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -480,6 +481,50 @@ func TestMaxMemory(t *testing.T) {
 			h.Publish(ctx, []string{"room-1"}, body, 0)
 		}
 		waitRetained(t, h, 120)
+	})
+
+	t.Run("concurrent publishes cannot overshoot", func(t *testing.T) {
+		const (
+			maxMemory = 5000
+			size      = 100
+			senders   = 8
+			perSender = 25
+		)
+		h := NewHub(ChannelsConfig{
+			Rules:     []*ChannelRule{{Pattern: "room-1", Messages: 1000, IdleTTL: time.Minute}},
+			MaxMemory: maxMemory,
+		})
+		sub, err := h.Subscribe(ctx, "room-1", func([]byte) bool { return true })
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer sub.Cancel()
+
+		msg := bytes.Repeat([]byte("x"), size)
+		var accepted atomic.Int64
+		var wg sync.WaitGroup
+		for i := 0; i < senders; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for j := 0; j < perSender; j++ {
+					if h.Publish(ctx, []string{"room-1"}, msg, 0).Enqueued("room-1") {
+						accepted.Add(1)
+					}
+				}
+			}()
+		}
+		wg.Wait()
+
+		if got := accepted.Load() * size; got > maxMemory {
+			t.Errorf("accepted %d bytes over a %d byte budget", got, maxMemory)
+		}
+		if got := h.Retained(); got > maxMemory {
+			t.Errorf("retained %d bytes over a %d byte budget", got, maxMemory)
+		}
+		if got := h.reserved.Load(); got != 0 {
+			t.Errorf("%d bytes still reserved after every publish returned", got)
+		}
 	})
 
 	t.Run("closing a channel releases its bytes", func(t *testing.T) {

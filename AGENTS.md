@@ -144,7 +144,7 @@ relay_sse {
 - **Channel pattern matching**: Wildcard suffix `*` only (e.g. `room-*` matches `room-1` but not `other-room`). No glob or regex.
 - **Ring buffer**: Messages stored as `[]*Message`, capped by `rule.Messages` count and `rule.MaxSize` byte cap on replay. `hub.NewHub` defaults `Messages` to `hub.DefaultMessages` (100) and `doPublish` trims unconditionally (`c.ring[len(c.ring)-max:]`), so the ring is never unbounded. `MaxSize` caps replay bytes in `buildReplay` and drops oversized messages in `doPublish`.
 - **Rate limiting**: Per connection in ws.go, using the interval from the channel's resolved rule via `Bus.Rule(channel)` (1s when the rule sets none). A client that keeps sending over the limit is closed with a policy violation.
-- **Memory budget**: `Hub.retained` is an atomic total of ring bytes, adjusted by channel actors; `Hub.reserve` refuses a publish that would exceed `max_memory` after evicting channels with no participants. `Hub.participants` counts subscribers globally for `max_participants`.
+- **Memory budget**: `Hub.retained` is an atomic total of ring bytes, adjusted by channel actors. `Hub.reserve` claims `len(body)` in `Hub.reserved` with a CAS on `retained+reserved`, so concurrent publishes cannot overshoot; the claim is released by `Channel.publish` (deferred) once the actor has accounted the bytes, and immediately when the target channel cannot be created. `Hub.participants` counts subscribers globally for `max_participants`.
 - **Error handling**: Caddyfile parsing returns `d.ArgErr()` / `d.Errf(...)` and wraps parse failures with the sub-directive name. Runtime errors propagate through Caddy's error handling. Channel publish drops oversized messages (checked in `doPublish`) and reports the drop through `hub.Status.Reason` as well as the log. Intercept failures (`InterceptSpec.IsZero()`) pass the body through unchanged.
 - **STUN Transaction ID**: `stun.NewTransactionIDSetter` exists in the pinned pion/stun v3.0.0 and is used directly.
 
@@ -158,7 +158,7 @@ relay_sse {
 6. **Directive publish excludes the sender, template `publish` does not** — For directive publish (ws.go), `sub.ID` is passed as `exclude` so the sender doesn't receive their own message. Template-invoked `publish` passes `0` (no exclusion).
 7. **SSE keepalive** — A 15s ticker sends `: keepalive\n\n` comments to keep the connection alive. This is separate from any application-level heartbeat.
 8. **Multicall binary** — The Docker image uses `toybox` as a single multicall binary. The `Dockerfile` creates the symlinks in a `RUN` step right after copying it; there is no `entrypoint.sh`.
-9. **`max_memory` is a soft cap** — the hub tracks retained bytes and evicts idle channels before refusing a publish, so concurrent publishes can overshoot slightly. A channel only closes when it has no participants, so no release is needed on close.
+9. **`max_memory` is exact, not soft** — a publish first claims its bytes in `Hub.reserved` and only then asks the actor to retain them, so the budget is checked against `retained+reserved` and concurrent publishes cannot slip past one stale check. `Channel.publish` releases the claim with `defer`, which also covers the oversize and closed-channel paths. A channel only closes when it has no participants, so no release is needed on close.
 10. **A subscriber always has an ID ≥ 1** — `Publish` treats `exclude == 0` as "skip nobody", so IDs start at 1 in `newChannel`. Starting at 0 silently excluded the first subscriber of every channel from all `exclude == 0` publishes (SSE `POST`, template `publish`).
 11. **One writer per subscriber** — `send` runs on the participant's writer goroutine, never on the actor goroutine and never on the transport's own loop. The SSE handler therefore hands messages to its own loop over a channel rather than writing to the `http.ResponseWriter` from `send`; writing to a `ResponseWriter` off the handler goroutine is a data race even with a mutex.
 12. **SSE subscribes before it writes headers** — `sse.serveGet` calls `bus.Subscribe` first, then writes `200` and flushes. The response arriving is therefore proof that the subscription exists; an earlier ordering lost messages published in between and made `tests/e2e` flaky.
@@ -185,6 +185,10 @@ relay_sse {
 | Plugin build | `xcaddy build --with github.com/frinknet/caddy-relay` | The `build` stage does this with `--replace` pointing at the local tree |
 
 The `Dockerfile` supports `TARGETARCH` (amd64/arm64) for downloading the correct toybox binary.
+
+**Always run the container suite before reporting a change as done**: `go test -race ./...`, then `./build.sh`, then `tests/e2e/run.sh`. Unit tests alone are not enough, because the image, the Dockerfile and the shipped `tests/e2e/Caddyfile` are only exercised there.
+
+**Always put a timeout on shell commands**: pass a bounded `auto_background_after` (and the tool's own timeout where one exists) rather than relying on the default, and wrap potentially hanging steps so a build, test or container run can never stall a session. Nothing here is allowed to run unbounded.
 
 ---
 
@@ -232,8 +236,8 @@ Available inside `intercept { template { ... } }` blocks:
 |------|-------|---------|
 | `README.md` | 275 | Project overview, directives, quick start, doc pointers |
 | `AGENTS.md` | 266 | This file |
-| `spec.md` | 474 | File-by-file implementation spec, maintained by hand |
-| `BACKLOG.md` | 182 | Open work |
+| `spec.md` | 477 | File-by-file implementation spec, maintained by hand |
+| `BACKLOG.md` | 190 | Open work |
 | `.gitignore` | 6 | Excludes `AGENTS.md`, `BACKLOG.md`, editor swap/backup files, `.env` |
 | `.github/workflows/ci.yml` | 41 | gofmt, build, vet, `test -race`; second job: `./build.sh` + `tests/e2e/run.sh` |
 | `.dockerignore` | 8 | Excludes everything dot-prefixed plus `*.md`, `build.sh`, `Dockerfile` |
@@ -248,9 +252,9 @@ Available inside `intercept { template { ... } }` blocks:
 | `pkg/hub/bus.go` | 41 | Bus interface + Subscription/SubID types |
 | `pkg/hub/message.go` | 17 | Message struct with Clone |
 | `pkg/hub/publish.go` | 78 | Result/Status types: per-channel enqueue, drop count and reason |
-| `pkg/hub/hub.go` | 279 | Hub: channel registry, caps, memory budget, subscribe, publish, pattern matching |
-| `pkg/hub/channel.go` | 393 | Channel actor: ring buffer, participant queues, replay, idle close, eviction |
-| `pkg/hub/hub_test.go` | 624 | Hub unit tests (ring, caps, exclusion, drops, sweep, memory) |
+| `pkg/hub/hub.go` | 305 | Hub: channel registry, caps, memory budget, subscribe, publish, pattern matching |
+| `pkg/hub/channel.go` | 398 | Channel actor: ring buffer, participant queues, replay, idle close, eviction |
+| `pkg/hub/hub_test.go` | 669 | Hub unit tests (ring, caps, exclusion, drops, sweep, memory) |
 | `pkg/hub/subscribe.go` | 9 | Subscription error values |
 | `pkg/stun/stun.go` | 51 | Minimal STUN binding request/response server |
 | `pkg/stun/stun_test.go` | 91 | STUN binding tests |
