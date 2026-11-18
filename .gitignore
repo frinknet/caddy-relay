@@ -1,21 +1,6 @@
-# Go
-/build/
-/go/pkg/
-/go/mod/
-*.o
-*.out
-!build/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# IDE
-.vscode/
-.idea/
+AGENTS.md
+BACKLOG.md
 *.swp
 *.swo
 *~
-
-# Docker
 .env
