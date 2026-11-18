@@ -1,6 +1,8 @@
-AGENTS.md
-BACKLOG.md
-*.swp
-*.swo
-*~
-.env
+.*
+*.md
+!LICENSE
+tests/
+data/
+build.sh
+*.log
+Dockerfile
