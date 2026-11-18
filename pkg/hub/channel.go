@@ -92,8 +92,9 @@ func (c *Channel) shutdown() {
 	close(c.done)
 }
 
-// Dropped reports how many messages were discarded because a subscriber's
-// outbound queue was full.
+// Dropped reports how many messages were discarded for this channel: oversize
+// bodies that were never retained, plus per-subscriber drops caused by a full
+// outbound queue.
 func (c *Channel) Dropped() uint64 { return c.dropped.Load() }
 
 // retainedBytes is the total bytes held in the ring. Actor-only.
@@ -280,21 +281,34 @@ func (c *Channel) buildReplay() [][]byte {
 	return out
 }
 
-// publish is called from Hub.Publish.
-func (c *Channel) publish(body []byte, exclude SubID) bool {
+// publish is called from Hub.Publish. It waits for the actor so the returned
+// status describes this message rather than an estimate.
+func (c *Channel) publish(body []byte, exclude SubID) Status {
+	reply := make(chan Status, 1)
 	select {
-	case c.inbox <- func() { c.doPublish(body, exclude) }:
-		return true
+	case c.inbox <- func() { reply <- c.doPublish(body, exclude) }:
 	case <-c.done:
-		return false
+		return Status{Reason: ReasonClosed}
+	}
+	select {
+	case st := <-reply:
+		return st
+	case <-c.done:
+		// The actor may have handled the message just before stopping.
+		select {
+		case st := <-reply:
+			return st
+		default:
+			return Status{Reason: ReasonClosed}
+		}
 	}
 }
 
-func (c *Channel) doPublish(body []byte, exclude SubID) {
+func (c *Channel) doPublish(body []byte, exclude SubID) Status {
 	if c.rule.MaxSize > 0 && int64(len(body)) > c.rule.MaxSize {
 		c.dropped.Add(1)
-		c.reportDrop("oversize")
-		return
+		c.reportDrop(ReasonOversize)
+		return Status{Reason: ReasonOversize}
 	}
 	// append to ring
 	msg := &Message{Body: append([]byte(nil), body...), Timestamp: time.Now()}
@@ -315,6 +329,7 @@ func (c *Channel) doPublish(body []byte, exclude SubID) {
 
 	// fan out without blocking: each participant owns a queue drained by
 	// its own writer goroutine.
+	status := Status{Enqueued: true}
 	for id, p := range c.participants {
 		if id == exclude {
 			continue
@@ -325,12 +340,17 @@ func (c *Channel) doPublish(body []byte, exclude SubID) {
 		}
 		if !p.enqueue(msg.Body) {
 			c.dropped.Add(1)
-			c.reportDrop("slow subscriber")
+			status.Dropped++
+			c.reportDrop(ReasonSlowSubscriber)
 		}
 	}
 	if len(c.participants) == 0 {
 		c.lastPart = time.Now()
 	}
+	if status.Dropped > 0 {
+		status.Reason = ReasonSlowSubscriber
+	}
+	return status
 }
 
 // reportDrop surfaces dropped messages, at most once per dropLogInterval per

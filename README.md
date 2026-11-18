@@ -11,9 +11,9 @@ App module ID: `relay` (Caddy's JSON app key is also `relay`). Source:
 ## Build
 
     go vet ./...
-    go test -race ./...            # unit, transport and in-process end-to-end tests
+    go test -race ./...            # unit and transport tests
     ./build.sh                     # the only supported way to build the image
-    go test ./tests/e2e/           # also runs the image and drives every feature
+    tests/e2e/run.sh               # runs the image and drives it over published ports
     docker run --rm -p 80:80 -p 443:443 -p 3478:3478/udp caddy-relay:test
 
 `build.sh` is the supported build entry point: it derives the image name from
@@ -181,6 +181,12 @@ dropped, counted, and reported to Caddy's log (`relay: dropped messages`,
 with the channel and reason) at most once per channel per 10s. A subscriber
 whose connection fails is removed from the channel.
 
+The publish result carries the same information per channel: `Enqueued`,
+the number of subscribers that had to drop this message (`Dropped`), and a
+`Reason` (`oversize`, `slow subscriber`, `memory`, `closed`, `unavailable`).
+A template can react to it, for example
+`{{ if not (index (publish channel message) channel).OK }}...{{ end }}`.
+
 ## Intercept
 
 **URL mode** — the raw body is POSTed as `application/json` with a 5s
@@ -244,15 +250,14 @@ fetch("https://example.com/events/room-1", { method: "POST", body: "hello" })
 ## Docs and status
 
 `go test -race ./...` covers the hub, both transports, STUN, TURN and the
-Caddyfile adapter, and `tests/e2e` starts a real Caddy in-process from a
-Caddyfile and drives real WebSocket and SSE clients through template and URL
-intercepts. The same package also runs the built image with
-`tests/e2e/Caddyfile` and exercises STUN, TURN (with REST credentials),
-WebSocket over TLS, both transports and both intercept modes over published
-ports. The container part skips itself unless the image exists, so build
-first:
+Caddyfile adapter. `tests/e2e/run.sh` is the end-to-end suite: it renders
+`tests/e2e/Caddyfile`, runs the built image with Docker, waits for the image's
+own healthcheck, and then drives the container over published ports (HTTP and
+HTTPS sites, SSE publish/intercept/replay, the channel allow-list, the
+WebSocket handshake and origin policy, a STUN binding request, and the
+TURN-over-TLS listener). It needs Docker and the image:
 
-    ./build.sh && go test ./tests/e2e/
+    ./build.sh && tests/e2e/run.sh
 
 CI runs all of it, including the image build. The plugin has not been run
 against real browsers or behind a load balancer.

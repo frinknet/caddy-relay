@@ -150,9 +150,14 @@ another subscriber.
 
 ## `pkg/hub/publish.go`
 
-`Result` reports, per channel name, whether a publish was enqueued. Its
-`String` method returns the empty string so a bare `publish` inside a template
-emits nothing; callers inspect the map with `index` or `range`.
+`Result` reports, per channel name, a `Status`: whether a publish was enqueued
+(`Enqueued`), how many subscribers had to drop it (`Dropped`), and, when
+something was lost, a `Reason` (`oversize`, `slow subscriber`, `memory`,
+`closed`, `unavailable`). `Status.OK` is true only when the channel took the
+message with no drops, `Result.OK` when that holds for every channel, and
+`Result.Enqueued`/`Result.Dropped` read one channel or the totals. `String`
+returns the empty string so a bare `publish` inside a template emits nothing,
+and `Status.String` returns `true`/`false` for templates that index the result.
 
 ## `pkg/hub/hub.go`
 
@@ -171,7 +176,8 @@ emits nothing; callers inspect the map with `index` or `range`.
 - `acquireParticipant` and `releaseParticipant` maintain the global
   `MaxParticipants` cap with atomic compare-and-swap. The counter stays zero
   when the cap is unset.
-- `Participants` and `Retained` expose the two counters.
+- `Participants`, `Retained` and `Dropped` expose the counters. `Dropped` sums
+the live channels' drop counters.
 - `addRetained` adjusts the memory budget and ignores updates after `Stop`.
 - `reserve(n)` reports whether `n` more bytes fit. It is a soft cap: when over
   budget it asks each channel to evict itself if idle; concurrent publishes may
@@ -183,9 +189,9 @@ emits nothing; callers inspect the map with `index` or `range`.
 - `Subscribe` gets or creates the channel and forwards to the channel actor.
 - `Publish` walks the requested patterns. A wildcard applies to existing
   channels only; a concrete name is created on demand. Before publishing it
-  reserves the estimated bytes (`len(body)` per target) and marks the pattern
-  false when the budget cannot be met. Each target channel reports its own
-  enqueue result.
+  reserves the estimated bytes (`len(body)` per target) and reports
+  `ReasonMemory` when the budget cannot be met, `ReasonUnavailable` when the
+  channel cannot be created. Each target channel returns its own `Status`.
 - `patternMatch` treats a trailing `*` as a prefix match and everything else as
   a literal; `isWildcard` tests for that suffix.
 
@@ -226,11 +232,14 @@ inbox, which are executed by one `run` goroutine.
   becomes empty.
 - `buildReplay` returns the retained bodies, limited by `Messages` and by
   `MaxSize` (default 256 KiB) when that field is unset.
-- `publish` enqueues `doPublish` on the actor. `doPublish` drops an oversize
-  body and reports it, appends a clone to the ring, trims the ring to
-  `Messages` and updates the memory budget, then fans out non-blocking to every
-  participant except `exclude`. Failed participants are removed; a full queue
-  counts as a drop.
+- `publish` enqueues `doPublish` on the actor and waits for its reply, so the
+  returned `Status` describes this message. A channel that closes first reports
+  `ReasonClosed`. `doPublish` drops an oversize body and reports it with
+  `ReasonOversize`, appends a clone to the ring, trims the ring to `Messages`
+  and updates the memory budget, then fans out non-blocking to every
+  participant except `exclude`. Failed participants are removed; each full
+  queue counts as a drop and is returned in `Status.Dropped` with
+  `ReasonSlowSubscriber`.
 - `reportDrop` logs at most once per channel per `dropLogInterval`.
 - `shouldClose` returns false for a dead channel or one with participants. It
   closes immediately when the ring is empty and `IdleTTL` has elapsed since the
@@ -453,11 +462,12 @@ are middleware handlers.
 | Build | `go build ./...` |
 | Vet | `go vet ./...` |
 | Tests | `go test -race ./...` |
-| End to end, in-process and against the built image | `./build.sh && go test ./tests/e2e/` |
+| End to end against the built image | `./build.sh && tests/e2e/run.sh` |
 
 All of these run in CI (`.github/workflows/ci.yml`), which also builds the
-image. Both end-to-end suites use Go clients; nothing has been exercised from a
-real browser or behind a load balancer.
+image. The end-to-end suite is a bash script that orchestrates the container
+and checks it with `curl`, `openssl` and a raw STUN datagram; nothing has been
+exercised from a real browser or behind a load balancer.
 
 ## Open items
 

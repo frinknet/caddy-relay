@@ -1,9 +1,9 @@
 # caddy-relay container end-to-end config.
 #
-# tests/docker/docker_test.go substitutes the {{PLACEHOLDER}} ports (chosen at
-# runtime so the test does not collide with whatever else is on the host),
-# mounts the result at /etc/caddy/Caddyfile in the image built by ./build.sh,
-# and drives every feature over published ports:
+# tests/e2e/run.sh substitutes the {{PLACEHOLDER}} ports (picked from a free
+# block at runtime so the test does not collide with whatever else is on the
+# host), mounts the result at /etc/caddy/Caddyfile in the image built by
+# ./build.sh, and drives the container over published ports:
 #
 #   - STUN and TURN (UDP) with REST credentials, plus TURN over TLS
 #   - channel limits: max_channels, max_participants, max_memory, and rules
@@ -11,10 +11,12 @@
 #   - relay_sse with a URL intercept that posts back to this same server
 #   - an HTTPS site (Caddy's internal CA) serving wss
 #
-# Sites bind all interfaces: the tests reach them through Docker's published
+# Sites bind all interfaces: the script reaches them through Docker's published
 # ports, and a listener on 127.0.0.1 inside the container would not be
-# reachable that way. The admin endpoint keeps its default address so the
-# image's HEALTHCHECK, which the test waits on, keeps working.
+# reachable that way. Host and container ports are the same, because the
+# relative intercept path posts back to the request's own Host.
+# The admin endpoint keeps its default address so the image's HEALTHCHECK,
+# which the script waits on, keeps working.
 
 {
 	relay {

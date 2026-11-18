@@ -272,6 +272,82 @@ func TestStalledSubscriberDoesNotBlockPublish(t *testing.T) {
 	}
 }
 
+// A publish reports per channel whether the message was enqueued and why it
+// was not, so a caller can react without reading the log.
+func TestPublishResultReportsStatus(t *testing.T) {
+	h := NewHub(ChannelsConfig{Rules: []*ChannelRule{{
+		Pattern: "lobby", Messages: 10, MaxSize: 8, IdleTTL: time.Minute,
+	}}})
+	ctx := context.Background()
+
+	res := h.Publish(ctx, []string{"lobby"}, []byte("ok"), 0)
+	if !res.Enqueued("lobby") || !res.OK() || res.Dropped() != 0 {
+		t.Fatalf("publish status = %+v, want enqueued without drops", res["lobby"])
+	}
+	if got := res.String(); got != "" {
+		t.Errorf("Result.String() = %q, want empty", got)
+	}
+
+	res = h.Publish(ctx, []string{"lobby"}, []byte("far too long"), 0)
+	if res.Enqueued("lobby") || res.OK() {
+		t.Errorf("oversize publish reported success: %+v", res["lobby"])
+	}
+	if got := res["lobby"].Reason; got != ReasonOversize {
+		t.Errorf("oversize reason = %q, want %q", got, ReasonOversize)
+	}
+
+	res = h.Publish(ctx, []string{"other"}, []byte("x"), 0)
+	if got := res["other"].Reason; got != ReasonUnavailable {
+		t.Errorf("unavailable reason = %q, want %q", got, ReasonUnavailable)
+	}
+}
+
+// A slow subscriber's drops show up in the publish result, not only in the
+// channel's lifetime counter.
+func TestPublishResultCountsSlowSubscriberDrops(t *testing.T) {
+	h := NewHub(ChannelsConfig{Rules: []*ChannelRule{{
+		Pattern: "lobby", Messages: 100, IdleTTL: time.Minute,
+	}}})
+	ctx := context.Background()
+
+	release := make(chan struct{})
+	blocked := make(chan struct{}, 1)
+	sub, err := h.Subscribe(ctx, "lobby", func([]byte) bool {
+		select {
+		case blocked <- struct{}{}:
+		default:
+		}
+		<-release
+		return true
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { close(release); sub.Cancel() }()
+
+	h.Publish(ctx, []string{"lobby"}, []byte("first"), 0)
+	select {
+	case <-blocked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("subscriber never received the first message")
+	}
+
+	dropped := 0
+	for i := 0; i < DefaultQueueSize*2 && dropped == 0; i++ {
+		res := h.Publish(ctx, []string{"lobby"}, []byte("burst"), 0)
+		if res["lobby"].Reason != "" && res["lobby"].Reason != ReasonSlowSubscriber {
+			t.Fatalf("reason = %q, want %q or empty", res["lobby"].Reason, ReasonSlowSubscriber)
+		}
+		dropped = res.Dropped()
+	}
+	if dropped == 0 {
+		t.Fatal("publish Result never reported a drop for a stalled subscriber")
+	}
+	if h.Dropped() == 0 {
+		t.Error("Hub.Dropped() = 0, want > 0 after a reported drop")
+	}
+}
+
 func TestIdleChannelIsSweptAndRecreated(t *testing.T) {
 	h := NewHub(ChannelsConfig{Rules: []*ChannelRule{{
 		Pattern: "lobby", Messages: 5, IdleTTL: time.Millisecond,
@@ -366,23 +442,25 @@ func TestMaxMemory(t *testing.T) {
 		}
 		defer sub.Cancel()
 
-		if res := h.Publish(ctx, []string{"room-1"}, body, 0); !res["room-1"] {
+		if res := h.Publish(ctx, []string{"room-1"}, body, 0); !res.Enqueued("room-1") {
 			t.Fatal("first publish was refused")
 		}
 		waitRetained(t, h, 60)
-		if res := h.Publish(ctx, []string{"room-1"}, body, 0); res["room-1"] {
+		if res := h.Publish(ctx, []string{"room-1"}, body, 0); res.Enqueued("room-1") {
 			t.Error("publish was accepted over max_memory with a busy channel")
+		} else if got := res["room-1"].Reason; got != ReasonMemory {
+			t.Errorf("reason = %q, want %q", got, ReasonMemory)
 		}
 	})
 
 	t.Run("evicts an idle channel to make room", func(t *testing.T) {
 		h := NewHub(ChannelsConfig{Rules: []*ChannelRule{rule()}, MaxMemory: 100})
-		if res := h.Publish(ctx, []string{"room-a"}, body, 0); !res["room-a"] {
+		if res := h.Publish(ctx, []string{"room-a"}, body, 0); !res.Enqueued("room-a") {
 			t.Fatal("publish to room-a was refused")
 		}
 		waitRetained(t, h, 60)
 
-		if res := h.Publish(ctx, []string{"room-b"}, body, 0); !res["room-b"] {
+		if res := h.Publish(ctx, []string{"room-b"}, body, 0); !res.Enqueued("room-b") {
 			t.Error("publish to room-b was refused instead of evicting an idle channel")
 		}
 		h.mu.Lock()

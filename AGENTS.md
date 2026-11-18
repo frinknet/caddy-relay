@@ -28,7 +28,7 @@ caddy-relay is a **Caddy web server plugin** (written in Go) providing real-time
 | `build.sh` | Docker build wrapper; derives the image name from `$PWD` |
 | `spec.md` | File-by-file implementation spec, maintained by hand |
 | `BACKLOG.md` | Open work, fixed pass notes first, then open items |
-| `tests/e2e/` | End-to-end suites: in-process (`e2e_test.go`) and the built image (`docker_test.go`, `Caddyfile`) |
+| `tests/e2e/` | Container end-to-end: `run.sh` orchestrates the built image, `Caddyfile` is its config |
 | `.github/workflows/ci.yml` | gofmt, build, vet, `test -race`, image build + container tests |
 
 ---
@@ -60,7 +60,7 @@ Client → WebSocket Message → ws.Serve read loop → bus.Intercept() → bus.
 
 - **Self-closing channels**: Each channel actor runs a 1s ticker and closes itself when idle (`IdleTTL`/`Retain` heuristics), then tells the hub via `Hub.removeChannel`. There is no hub-level sweeper, so the decision reads only actor-local state.
 - **Channel as actor**: Each `Channel` has an `inbox` channel + `run()` goroutine. All mutable state (ring, participants) is only touched inside closures sent to the inbox. The `mu` mutex guards only `dead`, which `shutdown` may set from any goroutine.
-- **Per-participant writer goroutines**: The actor never calls `send` itself. Each participant has a buffered queue drained by one goroutine, so a slow socket cannot stall the channel; a full queue drops the newest message and increments `Channel.Dropped()`. That goroutine is also the only writer for its subscriber, which is why the SSE handler hands messages to its own loop instead of writing from the hub's goroutine.
+- **Per-participant writer goroutines**: The actor never calls `send` itself. Each participant has a buffered queue drained by one goroutine, so a slow socket cannot stall the channel; a full queue drops the newest message, increments `Channel.Dropped()`, and is counted in the publish `Status.Dropped`. That goroutine is also the only writer for its subscriber, which is why the SSE handler hands messages to its own loop instead of writing from the hub's goroutine.
 - **Bus interface**: Transports never import Caddy types. They receive a `hub.Bus` interface implemented by `*Relay` in the root package.
 - **Intercept model**: Two modes — (a) **URL intercept** POSTs the message body to an external HTTP endpoint that returns transformed JSON, (b) **Template intercept** uses Go `text/template` with custom funcs (`message`, `data`, `channel`, `remote_ip`, `request`, `dict`, `set`, `publish`).
 
@@ -145,7 +145,7 @@ relay_sse {
 - **Ring buffer**: Messages stored as `[]*Message`, capped by `rule.Messages` count and `rule.MaxSize` byte cap on replay. `hub.NewHub` defaults `Messages` to `hub.DefaultMessages` (100) and `doPublish` trims unconditionally (`c.ring[len(c.ring)-max:]`), so the ring is never unbounded. `MaxSize` caps replay bytes in `buildReplay` and drops oversized messages in `doPublish`.
 - **Rate limiting**: Per connection in ws.go, using the interval from the channel's resolved rule via `Bus.Rule(channel)` (1s when the rule sets none). A client that keeps sending over the limit is closed with a policy violation.
 - **Memory budget**: `Hub.retained` is an atomic total of ring bytes, adjusted by channel actors; `Hub.reserve` refuses a publish that would exceed `max_memory` after evicting channels with no participants. `Hub.participants` counts subscribers globally for `max_participants`.
-- **Error handling**: Caddyfile parsing returns `d.ArgErr()` / `d.Errf(...)` and wraps parse failures with the sub-directive name. Runtime errors propagate through Caddy's error handling. Channel publish drops oversized messages (checked in `doPublish`) and reports the drop. Intercept failures (`InterceptSpec.IsZero()`) pass the body through unchanged.
+- **Error handling**: Caddyfile parsing returns `d.ArgErr()` / `d.Errf(...)` and wraps parse failures with the sub-directive name. Runtime errors propagate through Caddy's error handling. Channel publish drops oversized messages (checked in `doPublish`) and reports the drop through `hub.Status.Reason` as well as the log. Intercept failures (`InterceptSpec.IsZero()`) pass the body through unchanged.
 - **STUN Transaction ID**: `stun.NewTransactionIDSetter` exists in the pinned pion/stun v3.0.0 and is used directly.
 
 ## Non-Obvious Gotchas
@@ -169,6 +169,8 @@ relay_sse {
 17. **Relative intercept paths resolve against the receiving server** — `intercept /api/filter` becomes `<scheme>://<request host>/api/filter` via `resolveInterceptURL`, so it posts back to the same Caddy. An absolute URL is used unchanged.
 18. **`turn_external_ip` is advertised, `turn_bind` is bound** — relays bind `turn_bind` (0.0.0.0 by default) and hand clients the external IP. Without that split, a container with published ports cannot reach its own relays.
 19. **`subscribe` vs `publish` are independent** — the path channel is checked against `subscribe`; `publish` is where the message goes. An endpoint may read `room-*` and write to `lobby`.
+20. **`Publish` waits for the actor** — it enqueues `doPublish` and blocks on the reply so `Result` reports this message's outcome, including `Dropped` and `Reason`. That is safe because `doPublish` never blocks (per-participant enqueues are non-blocking); a channel that closes first reports `ReasonClosed`.
+21. **E2E host and container ports must match one-to-one** — `tests/e2e/run.sh` publishes the same port on both sides because the relative intercept posts back to the request's own `Host` (gotcha 17). Ephemeral `-p 127.0.0.1::80` mappings break that path. The script picks a random block and retries when Docker refuses a bound port; the TURN relay range is not published because the script does not allocate relays.
 
 ## Build & Deploy
 
@@ -176,8 +178,8 @@ relay_sse {
 |---------|-----|-------|
 | Build | `go build` | Compiles the plugin standalone |
 | Docker | `./build.sh` | The only supported build path: derives the image name, refreshes old images, then builds `caddy-relay:test` (multi-stage, `FROM scratch`) |
-| Test | `go test -race ./...` | Hub, transport, STUN, TURN, Caddyfile adapt/validate and in-process end-to-end tests |
-| Container test | `go test ./tests/e2e/` | The same package also runs the built image; skips unless `caddy-relay:test` (or `$CADDY_RELAY_IMAGE`) exists |
+| Test | `go test -race ./...` | Hub, transport, STUN, TURN and Caddyfile adapt/validate tests |
+| Container test | `tests/e2e/run.sh` | Runs the built image with `tests/e2e/Caddyfile` and checks it over published ports; needs `caddy-relay:test` (or `$CADDY_RELAY_IMAGE`) |
 | Vet | `go vet` | Static analysis (passes clean) |
 | Container entry | `/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile` | Set in Dockerfile ENTRYPOINT + CMD; no shell wrapper |
 | Plugin build | `xcaddy build --with github.com/frinknet/caddy-relay` | The `build` stage does this with `--replace` pointing at the local tree |
@@ -222,18 +224,18 @@ Available inside `intercept { template { ... } }` blocks:
 - **Healthcheck**: speaks HTTP over a raw toybox socket, `printf 'GET /config/ HTTP/1.1\r\nHost: 127.0.0.1:2019\r\nConnection: close\r\n\r\n' | nc | grep -q '200 OK'`, every 30s, 5s timeout, 3 retries. `toybox wget` cannot be used: it sends `Host: 127.0.0.1` with no port, and the admin endpoint requires an exact Host match, so it can only ever get a 403. This assumes the default admin address.
 - **No upx**: upx 4.2.4 cannot pack the published toybox binary at any level ("MemBuffer invalid array index 0"), so the step was dropped rather than made non-fatal.
 - **Exposed ports**: 80 (HTTP), 443 (HTTPS), 443/udp (QUIC), 3478/udp (STUN), 5349/udp and 5349/tcp (TURN, TURN over TLS). The TURN relay range from `turn_relay_ports` must be published by the caller.
-- **CI**: `.github/workflows/ci.yml` runs `gofmt -l`, `go build`, `go vet` and `go test -race`, then a second job runs `./build.sh` and the container end-to-end tests.
+- **CI**: `.github/workflows/ci.yml` runs `gofmt -l`, `go build`, `go vet` and `go test -race`, then a second job runs `./build.sh` and `tests/e2e/run.sh`.
 
 ## File Inventory
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `README.md` | 270 | Project overview, directives, quick start, doc pointers |
-| `AGENTS.md` | 264 | This file |
-| `spec.md` | 460 | File-by-file implementation spec, maintained by hand |
-| `BACKLOG.md` | 163 | Open work |
+| `README.md` | 275 | Project overview, directives, quick start, doc pointers |
+| `AGENTS.md` | 266 | This file |
+| `spec.md` | 474 | File-by-file implementation spec, maintained by hand |
+| `BACKLOG.md` | 182 | Open work |
 | `.gitignore` | 6 | Excludes `AGENTS.md`, `BACKLOG.md`, editor swap/backup files, `.env` |
-| `.github/workflows/ci.yml` | 43 | gofmt, build, vet, `test -race`; second job: `./build.sh` + container tests |
+| `.github/workflows/ci.yml` | 41 | gofmt, build, vet, `test -race`; second job: `./build.sh` + `tests/e2e/run.sh` |
 | `.dockerignore` | 8 | Excludes everything dot-prefixed plus `*.md`, `build.sh`, `Dockerfile` |
 | `go.mod` | 124 | Module declaration + dependency pins |
 | `go.sum` | 481 | Dependency checksums |
@@ -245,10 +247,10 @@ Available inside `intercept { template { ... } }` blocks:
 | `pkg/hub/spec.go` | 60 | ChannelRule, ChannelsConfig, SubscribeSpec, PublishSpec, InterceptSpec types |
 | `pkg/hub/bus.go` | 41 | Bus interface + Subscription/SubID types |
 | `pkg/hub/message.go` | 17 | Message struct with Clone |
-| `pkg/hub/publish.go` | 13 | Result type (map[string]bool with empty Stringer) |
-| `pkg/hub/hub.go` | 266 | Hub: channel registry, caps, memory budget, subscribe, publish, pattern matching |
-| `pkg/hub/channel.go` | 374 | Channel actor: ring buffer, participant queues, replay, idle close, eviction |
-| `pkg/hub/hub_test.go` | 546 | Hub unit tests (ring, caps, exclusion, drops, sweep, memory) |
+| `pkg/hub/publish.go` | 78 | Result/Status types: per-channel enqueue, drop count and reason |
+| `pkg/hub/hub.go` | 279 | Hub: channel registry, caps, memory budget, subscribe, publish, pattern matching |
+| `pkg/hub/channel.go` | 393 | Channel actor: ring buffer, participant queues, replay, idle close, eviction |
+| `pkg/hub/hub_test.go` | 624 | Hub unit tests (ring, caps, exclusion, drops, sweep, memory) |
 | `pkg/hub/subscribe.go` | 9 | Subscription error values |
 | `pkg/stun/stun.go` | 51 | Minimal STUN binding request/response server |
 | `pkg/stun/stun_test.go` | 91 | STUN binding tests |
@@ -258,10 +260,8 @@ Available inside `intercept { template { ... } }` blocks:
 | `pkg/ws/ws_test.go` | 235 | WebSocket transport tests against a fake bus |
 | `pkg/sse/sse.go` | 134 | SSE transport: GET (stream) + POST (publish) |
 | `pkg/sse/sse_test.go` | 208 | SSE transport tests against a fake bus |
-| `tests/e2e/e2e_test.go` | 247 | In-process end-to-end: real Caddy from a Caddyfile, real WS/SSE clients |
-| `tests/e2e/Caddyfile` | 106 | Container config: STUN, TURN, TLS, channels, both transports, intercepts, HTTPS |
-| `tests/e2e/docker_test.go` | 435 | Container end-to-end: runs the image and drives every feature over published ports |
-| `tests/e2e/helpers_test.go` | 156 | Shared clients for both end-to-end suites |
+| `tests/e2e/run.sh` | 244 | Container end-to-end: renders the config, runs the image, checks HTTP/SSE/WS/STUN/TLS |
+| `tests/e2e/Caddyfile` | 108 | Container config: STUN, TURN, TLS, channels, both transports, intercepts, HTTPS |
 | `www/Caddyfile` | 86 | Full-featured example config |
 | `Dockerfile` | 115 | Multi-stage build to scratch image |
 | `build.sh` | 96 | Image build wrapper |

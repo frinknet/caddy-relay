@@ -23,8 +23,6 @@ jobs:
           fi
       - run: go build ./...
       - run: go vet ./...
-      # The container suite in tests/e2e skips itself unless the image
-      # exists, so this runs the in-process end-to-end tests only.
       - run: go test -race ./...
 
   docker:
@@ -40,4 +38,4 @@ jobs:
       - name: build the image
         run: ./build.sh
       - name: end-to-end tests
-        run: go test -count=1 -v ./tests/e2e/
+        run: tests/e2e/run.sh

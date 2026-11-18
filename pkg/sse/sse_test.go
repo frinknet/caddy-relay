@@ -38,7 +38,7 @@ func (b *fakeBus) Publish(_ context.Context, patterns []string, body []byte, _ h
 	b.mu.Lock()
 	b.published = append(b.published, body)
 	b.mu.Unlock()
-	return hub.Result{patterns[0]: true}
+	return hub.Result{patterns[0]: hub.Status{Enqueued: true}}
 }
 
 func (b *fakeBus) Intercept(_ context.Context, _ *hub.InterceptSpec, body []byte, _ hub.InterceptInfo) ([]byte, bool) {

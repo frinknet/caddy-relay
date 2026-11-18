@@ -121,6 +121,17 @@ func (h *Hub) addRetained(delta int64) {
 // Retained reports the total bytes currently held in channel rings.
 func (h *Hub) Retained() int64 { return h.retained.Load() }
 
+// Dropped reports the total drops across every live channel: messages that
+// were oversize for their channel, plus per-subscriber drops caused by a full
+// outbound queue. A channel that closes takes its count with it.
+func (h *Hub) Dropped() uint64 {
+	var total uint64
+	for _, ch := range h.allChannels() {
+		total += ch.Dropped()
+	}
+	return total
+}
+
 // allChannels returns a snapshot of every live channel.
 func (h *Hub) allChannels() []*Channel {
 	h.mu.Lock()
@@ -220,9 +231,11 @@ func (h *Hub) Subscribe(ctx context.Context, name string, send func([]byte) bool
 }
 
 // Publish fans out body to every existing channel matching any pattern.
-// Concrete names are created on demand. A pattern reports false when it
-// could not be published to, including when the message would exceed the
-// max_memory budget and no idle channel could be evicted to make room.
+// Concrete names are created on demand. Each channel reports a Status: whether
+// it enqueued the message and how many subscribers had to drop it. A channel
+// reports ReasonMemory when the message would exceed the max_memory budget and
+// no idle channel could be evicted to make room, and ReasonUnavailable when it
+// could not be created.
 func (h *Hub) Publish(ctx context.Context, patterns []string, body []byte, exclude SubID) Result {
 	result := make(Result)
 	n := int64(len(body))
@@ -233,7 +246,7 @@ func (h *Hub) Publish(ctx context.Context, patterns []string, body []byte, exclu
 				continue
 			}
 			if !h.reserve(n * int64(len(matched))) {
-				result[pat] = false
+				result[pat] = Status{Reason: ReasonMemory}
 				continue
 			}
 			for _, ch := range matched {
@@ -241,12 +254,12 @@ func (h *Hub) Publish(ctx context.Context, patterns []string, body []byte, exclu
 			}
 		} else {
 			if !h.reserve(n) {
-				result[pat] = false
+				result[pat] = Status{Reason: ReasonMemory}
 				continue
 			}
 			ch, err := h.getOrCreate(pat)
 			if err != nil {
-				result[pat] = false
+				result[pat] = Status{Reason: ReasonUnavailable}
 				continue
 			}
 			result[pat] = ch.publish(body, exclude)
