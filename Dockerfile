@@ -1,8 +1,14 @@
 # ---------------------------------------------------------------------------
 # Stage A: Aquire toybox, SSL certs, tzdata. No source dependency.
 # ---------------------------------------------------------------------------
-FROM caddy:2.11.9-builder-alpine AS build
+# The builder tag follows the caddy version pinned in go.mod: xcaddy builds
+# whatever that module requires, so a newer builder image would only make the
+# tag misleading about the caddy the binary actually embeds.
+FROM caddy:2.8.4-builder-alpine AS build
 
+# upx is deliberately not used: 4.2.4 cannot pack the published toybox binary
+# at any level ("MemBuffer invalid array index 0"), and 760K of toybox is noise
+# next to caddy's binary.
 RUN apk add --no-cache ca-certificates tzdata curl
 
 ARG TARGETARCH
@@ -14,8 +20,7 @@ RUN case "${TARGETARCH}" in \
     && mkdir -p /out/licenses/caddy /out/licenses/toybox \
     && curl -fsSL "https://codeberg.org/landley/toybox/raw/branch/master/LICENSE" -o /out/licenses/toybox/LICENSE \
     && curl -fsSL "https://landley.net/toybox/bin/toybox-${TOYBOX_ARCH}" -o /out/toybox \
-    && chmod +x /out/toybox \
-    && upx --best --lzma /out/toybox
+    && chmod +x /out/toybox
 
 # ---------------------------------------------------------------------------
 # Stage B: Build caddy binary. Source-dependent, uses shared go cache.
@@ -48,7 +53,7 @@ RUN --mount=type=cache,id=gomod,target=/go/pkg/mod \
       mkdir -p /out/licenses/caddy /out/licenses/plugins; \
       go version -m /out/caddy > /out/versions.txt; \
       for f in "$GOMODCACHE"/github.com/caddyserver/caddy/v2@*/LICENSE*; do \
-        if [ -e "$f" ]; then cp "$f" /out/licenses/caddy/; fi; \
+        if [ -e "$f" ]; then cp -r "$f" /out/licenses/caddy/; fi; \
       done; \
       go version -m /out/caddy | awk '"'"'$1 == "dep" {print $2 "@" $3}'"'"' | while read -r modver; do \
         mod="${modver%@*}"; \
@@ -59,7 +64,7 @@ RUN --mount=type=cache,id=gomod,target=/go/pkg/mod \
           dest="/out/licenses/plugins/$pkg"; \
           mkdir -p "$dest"; \
           for lf in "$dir"/LICENSE* "$dir"/NOTICE*; do \
-            if [ -e "$lf" ]; then cp "$lf" "$dest/"; fi; \
+            if [ -e "$lf" ]; then cp -r "$lf" "$dest/"; fi; \
           done; \
         fi; \
       done; \
@@ -90,11 +95,21 @@ ENV XDG_CACHE_HOME="/var/cache/caddy"
 ENV TMPDIR="/tmp"
 ENV HOME="/tmp"
 
+# The admin endpoint requires an exact Host match, and toybox's wget sends
+# "Host: 127.0.0.1" with no port, so it can only ever get a 403. Speak HTTP
+# over a raw socket instead. Assumes the default admin address (localhost:2019).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD /bin/toybox wget -O /dev/null -T 2 http://127.0.0.1:2019/config/ >/dev/null 2>&1
+    CMD printf 'GET /config/ HTTP/1.1\r\nHost: 127.0.0.1:2019\r\nConnection: close\r\n\r\n' | /bin/toybox nc 127.0.0.1 2019 | /bin/toybox grep -q '200 OK'
 
-EXPOSE 80 443 443/udp
+EXPOSE 80 443 443/udp 3478/udp 5349/udp 5349/tcp
+# 3478/udp is STUN, 5349/udp is TURN and 5349/tcp is TURN over TLS, matching
+# www/Caddyfile. TURN relay ports come from turn_relay_ports (49152-65535 in
+# the example) and must be published by the caller.
 
 WORKDIR /srv/www
 ENTRYPOINT ["/bin/caddy"]
-CMD ["run"]
+# Point at the config explicitly. `caddy run` with no --config only looks for a
+# Caddyfile in the working directory, and the build moves it to /etc/caddy, so
+# the image would otherwise start with an empty config and serve nothing while
+# still passing its healthcheck.
+CMD ["run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]

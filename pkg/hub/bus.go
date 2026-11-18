@@ -6,10 +6,12 @@ import "context"
 // It is implemented by the root relay package, not by Hub itself — so the
 // transports never import the Caddy layer.
 type Bus interface {
-	// Subscribe joins a channel. send is called for each message the
-	// subscriber should receive (replay is returned separately). Returning
-	// false from send drops the subscriber. The returned Subscription
-	// carries the replay, a stable ID, and a Cancel func.
+	// Subscribe joins a channel. send is called, from a goroutine owned by
+	// the hub, for each message the subscriber should receive: retained
+	// messages first, then live ones, in order. Returning false from send
+	// drops the subscriber. send may block without stalling the channel;
+	// a subscriber that falls behind has its newest messages dropped.
+	// The returned Subscription carries a stable ID and a Cancel func.
 	Subscribe(ctx context.Context, channel string, send func([]byte) bool) (*Subscription, error)
 
 	// Publish fans out body to every existing channel matching any pattern.
@@ -22,6 +24,11 @@ type Bus interface {
 	// Returns the transformed body and ok=false if the message should be
 	// dropped.
 	Intercept(ctx context.Context, spec *InterceptSpec, body []byte, info InterceptInfo) ([]byte, bool)
+
+	// Rule returns the resolved rule for a channel name, or nil when no rule
+	// matches. Transports use it for limits the hub does not apply itself,
+	// such as the per-connection publish rate.
+	Rule(channel string) *ChannelRule
 }
 
 // SubID is a stable identifier for a subscription within the hub.
@@ -30,6 +37,5 @@ type SubID uint64
 // Subscription is what Subscribe returns.
 type Subscription struct {
 	ID     SubID
-	Replay [][]byte // prior messages, oldest first, byte-capped
 	Cancel func()
 }

@@ -1,0 +1,106 @@
+# caddy-relay container end-to-end config.
+#
+# tests/docker/docker_test.go substitutes the {{PLACEHOLDER}} ports (chosen at
+# runtime so the test does not collide with whatever else is on the host),
+# mounts the result at /etc/caddy/Caddyfile in the image built by ./build.sh,
+# and drives every feature over published ports:
+#
+#   - STUN and TURN (UDP) with REST credentials, plus TURN over TLS
+#   - channel limits: max_channels, max_participants, max_memory, and rules
+#   - relay_ws with a template intercept and an origin allow-list
+#   - relay_sse with a URL intercept that posts back to this same server
+#   - an HTTPS site (Caddy's internal CA) serving wss
+#
+# Sites bind all interfaces: the tests reach them through Docker's published
+# ports, and a listener on 127.0.0.1 inside the container would not be
+# reachable that way. The admin endpoint keeps its default address so the
+# image's HEALTHCHECK, which the test waits on, keeps working.
+
+{
+	relay {
+		stun udp/:{{STUN_PORT}}
+
+		turn udp/:{{TURN_PORT}}
+		turn_secret e2e-shared-secret
+		turn_external_ip 127.0.0.1
+		# Relays bind every interface so the published relay ports work, while
+		# clients are told to dial 127.0.0.1.
+		turn_bind 0.0.0.0
+		turn_relay_ports {{RELAY_MIN}}-{{RELAY_MAX}}
+
+		turn_tls :{{TURN_TLS_PORT}}
+		turn_tls_cert /etc/caddy/turn.crt
+		turn_tls_key /etc/caddy/turn.key
+
+		channels {
+			max_channels 100
+			max_participants 1000
+			max_memory 64M
+
+			room-* {
+				messages     10
+				participants 100
+				max_size     64K
+				rate_limit   10ms
+				idle_ttl     1m
+				retain       1m
+			}
+
+			lobby {
+				messages     5
+				participants 50
+				max_size     4K
+				rate_limit   10ms
+				idle_ttl     30s
+			}
+		}
+	}
+}
+
+http://:{{HTTP_PORT}} {
+	# WebSocket relay: template intercept, origin allow-list.
+	handle /ws/* {
+		relay_ws {
+			subscribe room-*
+			publish room-*
+			origins 127.0.0.1
+			intercept {
+				template {
+					{{ message }}
+				}
+			}
+		}
+	}
+
+	# SSE relay: every message goes through the URL intercept below, which
+	# posts back to this same server (a relative intercept path).
+	handle /events/* {
+		relay_sse {
+			subscribe room-*
+			publish room-*
+			intercept /intercept/url
+		}
+	}
+
+	# The URL intercept target. Its response replaces the message body.
+	handle /intercept/url {
+		respond `{"intercepted":true}`
+	}
+
+	# Readiness probe for the test.
+	handle {
+		respond "caddy-relay e2e"
+	}
+}
+
+https://localhost:{{HTTPS_PORT}} {
+	bind 0.0.0.0
+	tls internal
+
+	handle /ws/* {
+		relay_ws {
+			subscribe room-*
+			publish room-*
+		}
+	}
+}

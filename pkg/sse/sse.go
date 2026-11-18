@@ -36,40 +36,47 @@ func serveGet(cfg Config, bus hub.Bus, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
 
+	// Reject before writing the stream's status line, so a refused channel
+	// does not look like a healthy 200 stream.
 	channel := path.Base(r.URL.Path)
-	if cfg.Subscribe != nil && !patternMatch(cfg.Subscribe.Pattern, channel) {
-		fmt.Fprintf(w, "event: error\ndata: channel not allowed\n\n")
-		flusher.Flush()
+	if cfg.Subscribe == nil || !patternMatch(cfg.Subscribe.Pattern, channel) {
+		http.Error(w, "channel not allowed", http.StatusForbidden)
 		return
 	}
 
 	ctx := r.Context()
+	// Only this goroutine writes to w: the hub calls send from its writer
+	// goroutine, so messages are handed over through msgs instead of being
+	// written to the response directly. send blocks if this handler falls
+	// behind, which lets the hub's own queue apply its drop policy.
+	msgs := make(chan []byte, 64)
 	send := func(body []byte) bool {
-		if _, err := fmt.Fprintf(w, "data: %s\n\n", body); err != nil {
+		select {
+		case msgs <- body:
+			return true
+		case <-ctx.Done():
 			return false
 		}
-		flusher.Flush()
-		return true
 	}
 
+	// Subscribe before opening the stream. The client's response only arrives
+	// once the subscription exists, so a publish that follows it cannot fall
+	// into the gap, and a subscription failure is a clean error status rather
+	// than an error frame after a 200.
 	sub, err := bus.Subscribe(ctx, channel, send)
 	if err != nil {
-		fmt.Fprintf(w, "event: error\ndata: %s\n\n", err)
-		flusher.Flush()
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
 	defer sub.Cancel()
 
-	for _, body := range sub.Replay {
-		if !send(body) {
-			return
-		}
-	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush() // the stream is live from here on
+
 	// keepalive
 	t := time.NewTicker(15 * time.Second)
 	defer t.Stop()
@@ -77,6 +84,11 @@ func serveGet(cfg Config, bus hub.Bus, w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-ctx.Done():
 			return
+		case body := <-msgs:
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", body); err != nil {
+				return
+			}
+			flusher.Flush()
 		case <-t.C:
 			fmt.Fprint(w, ": keepalive\n\n")
 			flusher.Flush()
@@ -91,7 +103,7 @@ func servePost(cfg Config, bus hub.Bus, w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	channel := path.Base(r.URL.Path)
-	if cfg.Subscribe != nil && !patternMatch(cfg.Subscribe.Pattern, channel) {
+	if cfg.Subscribe == nil || !patternMatch(cfg.Subscribe.Pattern, channel) {
 		http.Error(w, "channel not allowed", http.StatusForbidden)
 		return
 	}

@@ -5,12 +5,23 @@
 	# Relay global config: STUN + TURN listeners, channel definitions
 	relay {
 		stun udp/:3478
-		turn udp/:5349
-		turn_external_ip 203.0.113.1
-		turn_relay_ports 49152-65535
+
+		# TURN is off in this shipped config: it needs a long random shared
+		# secret (anyone who can reach the port can relay through it) and the
+		# public IP to advertise. Generate a secret, set your external IP, then
+		# uncomment. turn_tls additionally needs a certificate and key on disk.
+		#
+		# turn udp/:5349
+		# turn_secret change-me-to-a-long-random-string
+		# turn_external_ip 203.0.113.1
+		# turn_relay_ports 49152-65535
+		# turn_tls :5349
+		# turn_tls_cert /etc/caddy/turn.crt
+		# turn_tls_key /etc/caddy/turn.key
 
 		channels {
 			max_channels 2000
+			max_participants 10000
 			max_memory 256M
 
 			# Pattern-based channel rules

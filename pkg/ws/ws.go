@@ -19,12 +19,16 @@ type Config struct {
 	Subscribe *hub.SubscribeSpec
 	Intercept *hub.InterceptSpec
 	Publish   *hub.PublishSpec
+
+	// OriginPatterns lists host patterns allowed in the Origin header, in
+	// addition to the request's own Host. Empty means same-origin only.
+	OriginPatterns []string
 }
 
 // Serve handles an HTTP request for the relay_ws directive.
 func Serve(cfg Config, bus hub.Bus, w http.ResponseWriter, r *http.Request) {
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		InsecureSkipVerify: false,
+		OriginPatterns: cfg.OriginPatterns,
 	})
 	if err != nil {
 		return
@@ -32,8 +36,12 @@ func Serve(cfg Config, bus hub.Bus, w http.ResponseWriter, r *http.Request) {
 	defer conn.Close(websocket.StatusInternalError, "")
 
 	channel := path.Base(r.URL.Path)
-	if cfg.Subscribe != nil && !patternMatch(cfg.Subscribe.Pattern, channel) {
+	if cfg.Subscribe == nil || !patternMatch(cfg.Subscribe.Pattern, channel) {
 		conn.Close(websocket.StatusPolicyViolation, "channel not allowed")
+		return
+	}
+	if cfg.Publish == nil {
+		conn.Close(websocket.StatusPolicyViolation, "no publish target")
 		return
 	}
 
@@ -56,13 +64,8 @@ func Serve(cfg Config, bus hub.Bus, w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { closed.Store(true); sub.Cancel() }()
 
-	for _, body := range sub.Replay {
-		if !send(body) {
-			return
-		}
-	}
-
-	limiter := rate.NewLimiter(rate.Every(rateLimit(cfg)), 1)
+	limiter := rate.NewLimiter(rate.Every(rateLimit(bus, channel)), 1)
+	denied := 0
 
 	for {
 		typ, body, err := conn.Read(ctx)
@@ -73,8 +76,16 @@ func Serve(cfg Config, bus hub.Bus, w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if !limiter.Allow() {
+			// Rather than dropping silently forever, close a client that keeps
+			// hammering the channel well past its limit.
+			denied++
+			if denied > rateLimitBurst {
+				conn.Close(websocket.StatusPolicyViolation, "rate limit exceeded")
+				return
+			}
 			continue
 		}
+		denied = 0
 
 		info := hub.InterceptInfo{
 			Channel:  channel,
@@ -89,10 +100,18 @@ func Serve(cfg Config, bus hub.Bus, w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// rateLimit returns the per-message interval for this transport.
-// The rule's RateLimit is not visible here; ws.go uses a fixed 1s default.
-// (Per-connection rate limiting is applied at this layer, per spec.)
-func rateLimit(cfg Config) time.Duration { return time.Second }
+// rateLimitBurst is how many messages a client may send while over its rate
+// limit before the connection is closed with a policy violation.
+const rateLimitBurst = 16
+
+// rateLimit returns the publish interval for channel: the channel rule's
+// rate_limit when it sets one, otherwise one message per second.
+func rateLimit(bus hub.Bus, channel string) time.Duration {
+	if rule := bus.Rule(channel); rule != nil && rule.RateLimit > 0 {
+		return rule.RateLimit
+	}
+	return time.Second
+}
 
 func patternMatch(pattern, name string) bool {
 	if len(pattern) > 0 && pattern[len(pattern)-1] == '*' {

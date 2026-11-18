@@ -10,39 +10,41 @@ import (
 
 // ChannelRule is one channel pattern declaration from the `channels {}` block.
 type ChannelRule struct {
-	Pattern      string        // "room-*", "lobby", etc.
-	Messages     int           // ring buffer size
-	Participants int           // max concurrent subscribers
-	MaxSize      int64         // max bytes per message
-	RateLimit    time.Duration // per-connection publish rate limit
-	IdleTTL      time.Duration // close after no participants this long
-	Retain       time.Duration // keep ring this long after last message
+	Pattern      string        `json:"pattern"`                // "room-*", "lobby", etc.
+	Messages     int           `json:"messages,omitempty"`     // ring buffer size
+	Participants int           `json:"participants,omitempty"` // max concurrent subscribers
+	MaxSize      int64         `json:"max_size,omitempty"`     // max bytes per message
+	RateLimit    time.Duration `json:"rate_limit,omitempty"`   // per-connection publish rate limit
+	IdleTTL      time.Duration `json:"idle_ttl,omitempty"`     // close after no participants this long
+	Retain       time.Duration `json:"retain,omitempty"`       // keep ring this long after last message
 }
 
 // ChannelsConfig is the full `channels {}` block.
 type ChannelsConfig struct {
-	Rules       []*ChannelRule
-	MaxChannels int
-	MaxMemory   int64 // bytes; 0 = unlimited
+	Rules       []*ChannelRule `json:"rules,omitempty"`
+	MaxChannels int            `json:"max_channels,omitempty"`
+	// MaxParticipants caps subscribers across all channels; 0 = unlimited.
+	MaxParticipants int   `json:"max_participants,omitempty"`
+	MaxMemory       int64 `json:"max_memory,omitempty"` // bytes; 0 = unlimited
 }
 
 // SubscribeSpec is the parsed `subscribe <pattern>` sub-directive.
 type SubscribeSpec struct {
-	Pattern string
+	Pattern string `json:"pattern,omitempty"`
 }
 
 // PublishSpec is the parsed `publish <pattern>` sub-directive.
 type PublishSpec struct {
-	Pattern string
+	Pattern string `json:"pattern,omitempty"`
 }
 
 // InterceptSpec is the parsed `intercept` sub-directive.
 // Exactly one of URL or Template is set. Compiled holds the parsed
 // template, populated at provision time.
 type InterceptSpec struct {
-	URL      string
-	Template string
-	Compiled *template.Template
+	URL      string             `json:"url,omitempty"`
+	Template string             `json:"template,omitempty"`
+	Compiled *template.Template `json:"-"`
 }
 
 // IsZero reports whether no intercept was configured.
