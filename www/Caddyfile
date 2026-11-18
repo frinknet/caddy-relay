@@ -1,0 +1,76 @@
+# caddy-relay full-featured Caddyfile
+# Demonstrates all relay features: STUN/TURN, channels, WebSocket, SSE
+
+{
+	# Relay global config: STUN + TURN listeners, channel definitions
+	relay {
+		stun udp/:3478
+		turn udp/:5349
+		turn_external_ip 203.0.113.1
+		turn_relay_ports 49152-65535
+
+		channels {
+			max_channels 2000
+			max_memory 256M
+
+			# Pattern-based channel rules
+			room-* {
+				messages        50
+				participants    100
+				max_size        64K
+				rate_limit      100ms
+				idle_ttl        5m
+				retain          10m
+			}
+
+			lobby {
+				messages        10
+				participants    500
+				max_size        16K
+				rate_limit      200ms
+				idle_ttl        30s
+			}
+		}
+	}
+}
+
+example.com {
+	bind :80
+	bind :443
+
+	# Route WebSocket upgrade requests
+	@ws {
+		header Connection "Upgrade"
+		header Upgrade "websocket"
+	}
+
+	# Route SSE requests
+	@sse {
+		path /events*
+	}
+
+	handle @ws {
+		relay_ws {
+			subscribe room-*
+			publish room-*
+			intercept /api/intercept
+		}
+	}
+
+	handle @sse {
+		relay_sse {
+			subscribe room-*
+			publish room-*
+			intercept {
+				template {
+					{{ message | publish channel }}
+				}
+			}
+		}
+	}
+
+	# Static files fallback
+	file_server {
+		root /srv/www
+	}
+}
