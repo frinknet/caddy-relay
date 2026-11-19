@@ -199,6 +199,25 @@ func TestServeWithoutPublishTargetIsRefused(t *testing.T) {
 	}
 }
 
+// A publish target outside the subscribe allow-list would let a client write
+// into channels it may not even read, so the connection is refused.
+func TestServeRejectsPublishTargetOutsideSubscribe(t *testing.T) {
+	bus := &fakeBus{}
+	srv := serveTest(t, bus, Config{
+		Subscribe: &hub.SubscribeSpec{Pattern: "room-*"},
+		Publish:   &hub.PublishSpec{Pattern: "lobby"},
+	})
+	ctx, conn := dial(t, srv, "/room-1")
+	if _, _, err := conn.Read(ctx); err == nil {
+		t.Fatal("read succeeded with a publish target outside subscribe")
+	} else if got := websocket.CloseStatus(err); got != websocket.StatusPolicyViolation {
+		t.Fatalf("close status = %v, want %v", got, websocket.StatusPolicyViolation)
+	}
+	if got := bus.publishedBodies(); len(got) != 0 {
+		t.Fatalf("published %q, want nothing", got)
+	}
+}
+
 // subscribe is the channel allow-list; without it the transport must refuse
 // rather than accept every channel.
 func TestServeWithoutSubscribePatternIsRefused(t *testing.T) {

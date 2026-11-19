@@ -217,6 +217,28 @@ func TestPostRejectsChannelOutsideSubscribePattern(t *testing.T) {
 	}
 }
 
+// The POST path is authorized against subscribe, so the publish target must
+// stay inside it too; otherwise one client could write into channels it may
+// not even read.
+func TestPostRejectsPublishTargetOutsideSubscribe(t *testing.T) {
+	bus := &fakeBus{}
+	srv := serveTest(t, bus, Config{
+		Subscribe: &hub.SubscribeSpec{Pattern: "room-*"},
+		Publish:   &hub.PublishSpec{Pattern: "lobby"},
+	})
+	resp, err := http.Post(srv.URL+"/room-1", "text/plain", strings.NewReader("hi"))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", resp.StatusCode)
+	}
+	if got := bus.publishedBodies(); len(got) != 0 {
+		t.Fatalf("published %q, want nothing", got)
+	}
+}
+
 // Without a subscribe pattern the transport must fail closed instead of
 // accepting every channel.
 func TestNoSubscribePatternFailsClosed(t *testing.T) {

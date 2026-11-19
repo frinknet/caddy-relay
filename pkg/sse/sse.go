@@ -116,6 +116,13 @@ func servePost(cfg Config, bus hub.Bus, w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "no publish target", http.StatusInternalServerError)
 		return
 	}
+	// subscribe is the endpoint's allow-list for both reading and writing, so
+	// the target must stay inside it. Provisioning rejects such a config, and
+	// this keeps a directly built Config from writing outside the allow-list.
+	if !hub.PatternWithin(cfg.Publish.Pattern, cfg.Subscribe.Pattern) {
+		http.Error(w, "publish target not allowed", http.StatusInternalServerError)
+		return
+	}
 
 	info := hub.InterceptInfo{
 		Channel:  channel,

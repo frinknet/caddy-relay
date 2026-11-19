@@ -213,6 +213,33 @@ func TestRelaySSEWithoutPublishIsValid(t *testing.T) {
 	}
 }
 
+// subscribe is the allow-list for both reading and writing, so a publish
+// target outside it must be refused rather than let a client write into
+// channels it may not read.
+func TestRelayPublishOutsideSubscribeFailsValidation(t *testing.T) {
+	for _, directive := range []string{"relay_ws", "relay_sse"} {
+		t.Run(directive, func(t *testing.T) {
+			raw := adapt(t, relayGlobalBlock+":8080 {\n\t"+directive+" {\n\t\tsubscribe room-*\n\t\tpublish lobby\n\t}\n}\n")
+			err := validate(t, raw)
+			if err == nil {
+				t.Fatal("validation succeeded, want a publish-outside-subscribe error")
+			}
+			if !strings.Contains(err.Error(), "outside subscribe") {
+				t.Fatalf("error = %v, want it to mention outside subscribe", err)
+			}
+		})
+	}
+}
+
+// A concrete target inside the subscribe wildcard is the normal shape and
+// must keep validating.
+func TestRelayPublishInsideSubscribeIsValid(t *testing.T) {
+	raw := adapt(t, relayGlobalBlock+":8080 {\n\trelay_sse {\n\t\tsubscribe room-*\n\t\tpublish room-1\n\t}\n}\n")
+	if err := validate(t, raw); err != nil {
+		t.Fatalf("publish inside subscribe failed validation: %v", err)
+	}
+}
+
 func TestRelayWSOriginsParse(t *testing.T) {
 	raw := adapt(t, relayGlobalBlock+":8080 {\n\trelay_ws {\n\t\tsubscribe room-*\n\t\tpublish room-*\n\t\torigins example.com *.example.com\n\t}\n}\n")
 	app := string(appJSON(t, raw, "http"))

@@ -82,7 +82,9 @@ pattern without a port admits that host on any port; one with a port pins it.
 
 `relay_ws` requires both `subscribe` and `publish`. `relay_sse` requires
 `subscribe`; `publish` is optional because a `GET` stream is read-only, but a
-`POST` without `publish` fails at request time.
+`POST` without `publish` fails at request time. When `publish` is set it must
+stay within `subscribe` (`hub.PatternWithin`), so the endpoint's allow-list
+bounds writes as well as reads; provisioning rejects a target outside it.
 
 The `intercept` sub-directive accepts either an inline URL or a block:
 
@@ -202,7 +204,10 @@ the live channels' drop counters.
   channel cannot be created (releasing that reservation). Each target channel
   returns its own `Status`.
 - `patternMatch` treats a trailing `*` as a prefix match and everything else as
-  a literal; `isWildcard` tests for that suffix.
+  a literal; `isWildcard` tests for that suffix. `PatternWithin(inner, outer)`
+  reports whether every name `inner` matches is also matched by `outer`, which
+  is how transports prove a publish target stays inside the subscribe
+  allow-list.
 
 ## `pkg/hub/channel.go`
 
@@ -328,7 +333,8 @@ the channel name from the last path segment. `upgradeWriter` follows the
 response writer's `Unwrap` chain to the first writer that implements
 `http.Hijacker`, because Caddy's wrappers expose hijacking only that way while
 `coder/websocket` asserts the interface directly. It rejects a channel outside
-the subscribe pattern and a missing publish target with a policy violation.
+the subscribe pattern, a missing publish target, and a publish target outside
+the subscribe pattern with a policy violation.
 
 The send callback writes text messages with a 10-second timeout and returns
 false once the connection has been marked closed. The handler subscribes, then
@@ -365,7 +371,8 @@ Only the handler goroutine writes the `http.ResponseWriter`: it sends
 15-second ticker sends `: keepalive` comments.
 
 `servePost` reads at most 1 MiB, validates the channel, requires a publish
-target, runs the intercept (dropping with 502 when it returns false or an empty
+target that stays within the subscribe pattern (`hub.PatternWithin`; otherwise
+500), runs the intercept (dropping with 502 when it returns false or an empty
 body), publishes without excluding anyone, and returns 202.
 
 ## `pkg/app/relay.go`
@@ -442,14 +449,14 @@ and `dict`/`set` build and update maps.
 `RelayWS` holds the raw subscribe, publish, intercept and origin strings plus
 the provisioned `ws.Config`, the app and a logger. Its module ID is
 `http.handlers.relay_ws`. `Provision` requires both subscribe and publish,
-resolves the app, compiles the intercept and fills the config. `ServeHTTP`
-delegates to `ws.Serve`.
+rejects a publish target outside subscribe, resolves the app, compiles the
+intercept and fills the config. `ServeHTTP` delegates to `ws.Serve`.
 
 `RelaySSE` holds the raw subscribe, publish and intercept strings plus the
 provisioned `sse.Config`, the app and a logger. Its module ID is
-`http.handlers.relay_sse`. `Provision` requires subscribe, resolves the app,
-compiles the intercept and fills the config. `ServeHTTP` delegates to
-`sse.Serve`.
+`http.handlers.relay_sse`. `Provision` requires subscribe, rejects a publish
+target outside subscribe, resolves the app, compiles the intercept and fills
+the config. `ServeHTTP` delegates to `sse.Serve`.
 
 ### Caddyfile parsing for the directives
 

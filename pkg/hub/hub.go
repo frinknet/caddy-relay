@@ -336,4 +336,20 @@ func patternMatch(pattern, name string) bool {
 	return pattern == name
 }
 
+// PatternWithin reports whether every channel name matched by inner is also
+// matched by outer, so a transport can prove that a publish target stays
+// inside the endpoint's subscribe allow-list. A trailing "*" matches by
+// prefix; anything else is a literal name, so a wildcard is never within a
+// literal.
+func PatternWithin(inner, outer string) bool {
+	if isWildcard(outer) {
+		prefix := strings.TrimSuffix(outer, "*")
+		return strings.HasPrefix(strings.TrimSuffix(inner, "*"), prefix)
+	}
+	if isWildcard(inner) {
+		return false
+	}
+	return inner == outer
+}
+
 func isWildcard(p string) bool { return strings.HasSuffix(p, "*") }

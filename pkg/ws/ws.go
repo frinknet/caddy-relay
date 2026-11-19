@@ -56,6 +56,13 @@ func Serve(cfg Config, bus hub.Bus, w http.ResponseWriter, r *http.Request) {
 		conn.Close(websocket.StatusPolicyViolation, "no publish target")
 		return
 	}
+	// subscribe is the endpoint's allow-list for both reading and writing, so
+	// the target must stay inside it. Provisioning rejects such a config, and
+	// this keeps a directly built Config from writing outside the allow-list.
+	if !hub.PatternWithin(cfg.Publish.Pattern, cfg.Subscribe.Pattern) {
+		conn.Close(websocket.StatusPolicyViolation, "publish target not allowed")
+		return
+	}
 
 	ctx := r.Context()
 

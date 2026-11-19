@@ -683,6 +683,9 @@ func (m *RelayWS) Provision(ctx caddy.Context) error {
 	if m.PublishStr == "" {
 		return fmt.Errorf("relay_ws: publish is required")
 	}
+	if !hub.PatternWithin(m.PublishStr, m.SubscribeStr) {
+		return fmt.Errorf("relay_ws: publish %q is outside subscribe %q", m.PublishStr, m.SubscribeStr)
+	}
 	r, err := hubFor(ctx)
 	if err != nil {
 		return err
@@ -734,9 +737,13 @@ func (RelaySSE) CaddyModule() caddy.ModuleInfo {
 func (m *RelaySSE) Provision(ctx caddy.Context) error {
 	m.log = ctx.Logger()
 	// subscribe is both the channel allow-list for GET streams and the check
-	// applied to POST publishes, so it is required.
+	// applied to POST publishes, so it is required, and the publish target
+	// must stay inside it.
 	if m.SubscribeStr == "" {
 		return fmt.Errorf("relay_sse: subscribe is required")
+	}
+	if m.PublishStr != "" && !hub.PatternWithin(m.PublishStr, m.SubscribeStr) {
+		return fmt.Errorf("relay_sse: publish %q is outside subscribe %q", m.PublishStr, m.SubscribeStr)
 	}
 	r, err := hubFor(ctx)
 	if err != nil {

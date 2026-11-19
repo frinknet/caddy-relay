@@ -76,6 +76,29 @@ func TestPatternMatching(t *testing.T) {
 	}
 }
 
+func TestPatternWithin(t *testing.T) {
+	cases := []struct {
+		inner, outer string
+		want         bool
+	}{
+		{"room-*", "room-*", true},
+		{"room-1", "room-*", true},
+		{"room-*", "*", true},
+		{"lobby", "*", true},
+		{"lobby", "lobby", true},
+		{"lobby", "room-*", false},
+		{"room-*", "room-1", false},
+		{"room-1", "room-1", true},
+		{"room-1", "room-2", false},
+		{"*", "room-*", false},
+	}
+	for _, c := range cases {
+		if got := PatternWithin(c.inner, c.outer); got != c.want {
+			t.Errorf("PatternWithin(%q, %q) = %v, want %v", c.inner, c.outer, got, c.want)
+		}
+	}
+}
+
 func TestRingIsBoundedWithoutMessagesRule(t *testing.T) {
 	h := NewHub(ChannelsConfig{Rules: []*ChannelRule{{Pattern: "lobby"}}})
 	ctx := context.Background()

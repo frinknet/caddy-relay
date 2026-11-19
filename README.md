@@ -166,14 +166,17 @@ syntax (`100ms`, `5m`). Numbers must be plain integers.
 
 | Sub-directive | Meaning |
 |---|---|
-| `subscribe <pattern>` | Channels this endpoint may address. **Required**; without it Caddy refuses to provision |
-| `publish <pattern>` | Target pattern for messages sent from this endpoint. **Required** for `relay_ws`, optional for a read-only SSE `GET` |
+| `subscribe <pattern>` | Channels this endpoint may address, for reading **and** writing. **Required**; without it Caddy refuses to provision |
+| `publish <pattern>` | Target pattern for messages sent from this endpoint. It must stay within `subscribe`; **required** for `relay_ws`, optional for a read-only SSE `GET` |
 | `intercept /url` | POST each message to an endpoint and use its response. A path is resolved against the server that received the message |
 | `intercept { template { ... } }` | Transform the message with a Go template (or a `<<TAG` heredoc) |
 | `origins <pattern>...` | Extra allowed WebSocket `Origin` hosts (`relay_ws` only). A pattern without a port matches that host on any port; a pattern with a port matches that port only. `*` matches any host |
 
-The channel in the request path is checked against `subscribe`; `publish` is a
-separate target, so an endpoint can read `room-*` and write to `lobby`.
+The channel in the request path is checked against `subscribe`, and so is the
+publish target: `subscribe` is the endpoint's allow-list for both directions,
+so `publish` must be a subset of it (`publish room-1` under `subscribe room-*`
+is fine; `publish lobby` under `subscribe room-*` is refused at provision
+time). Otherwise a client could write into channels it may not even read.
 
 **WebSocket** (`relay_ws`): the connection subscribes to the path channel,
 receives any buffered replay, then publishes each inbound text frame.
@@ -185,10 +188,11 @@ so `origins example.com` accepts `https://example.com:8443`; a pattern such as
 `example.com:8443` pins the port.
 
 **SSE** (`relay_sse`): `GET` opens a long-lived `text/event-stream` and
-replays the buffer; `POST` publishes the request body and returns `202`.
-A `: keepalive` comment is sent every 15s. Other methods get `405`. The
-handler subscribes before it writes the stream headers, so once a client has
-the response it cannot miss a later publish.
+replays the buffer; `POST` publishes the request body to the `publish` target
+and returns `202`. A `POST` whose target falls outside `subscribe` is refused
+with `500`. A `: keepalive` comment is sent every 15s. Other methods get `405`.
+The handler subscribes before it writes the stream headers, so once a client
+has the response it cannot miss a later publish.
 
 ### Dropped messages
 
