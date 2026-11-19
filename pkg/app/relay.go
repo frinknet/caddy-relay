@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	neturl "net/url"
 	"strconv"
@@ -951,6 +952,9 @@ func parseBytes(s string) (int64, error) {
 	n, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
 		return 0, err
+	}
+	if mult > 1 && (n > math.MaxInt64/mult || n < math.MinInt64/mult) {
+		return 0, fmt.Errorf("byte count %q overflows", s)
 	}
 	return n * mult, nil
 }

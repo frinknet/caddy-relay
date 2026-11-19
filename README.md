@@ -172,6 +172,11 @@ syntax (`100ms`, `5m`). Numbers must be plain integers.
 | `intercept { template { ... } }` | Transform the message with a Go template (or a `<<TAG` heredoc) |
 | `origins <pattern>...` | Extra allowed WebSocket `Origin` hosts (`relay_ws` only). A pattern without a port matches that host on any port; a pattern with a port matches that port only. `*` matches any host |
 
+A `template { ... }` block is rebuilt line by line: tokens on one Caddyfile
+line are joined with a single space, so a run of spaces survives only inside a
+quoted token. Use a heredoc (`template <<TAG ... TAG`) when the template's
+literal spacing matters.
+
 The channel in the request path is checked against `subscribe`, and so is the
 publish target: `subscribe` is the endpoint's allow-list for both directions,
 so `publish` must be a subset of it (`publish room-1` under `subscribe room-*`

@@ -456,6 +456,17 @@ func TestInterceptTemplateKeepsLineStructure(t *testing.T) {
 	}
 }
 
+// Tokens on one line are joined with a single space, so a run of spaces only
+// survives when it is inside a quoted token.
+func TestInterceptTemplateQuotedTokenKeepsSpacing(t *testing.T) {
+	raw := adapt(t, relayGlobalBlock+":8080 {\n\trelay_sse {\n\t\tsubscribe room-*\n\t\tpublish room-*\n\t\tintercept {\n\t\t\ttemplate {\n\t\t\t\t{{ message }} \"a  b\"\n\t\t\t}\n\t\t}\n\t}\n}\n")
+	got := relaySSEIntercept(t, raw)
+	want := "tmpl:{{ message }} a  b\n"
+	if got != want {
+		t.Errorf("intercept source = %q, want %q", got, want)
+	}
+}
+
 func TestInterceptTemplateHeredoc(t *testing.T) {
 	raw := adapt(t, relayGlobalBlock+":8080 {\n\trelay_sse {\n\t\tsubscribe room-*\n\t\tpublish room-*\n\t\tintercept {\n\t\t\ttemplate <<TMPL\n{\"a\":  \"{{ message }}\"}\nTMPL\n\t\t}\n\t}\n}\n")
 	got := relaySSEIntercept(t, raw)
@@ -600,5 +611,67 @@ func TestResolveInterceptURL(t *testing.T) {
 				t.Errorf("resolved %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestParseBytes(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int64
+		ok   bool
+	}{
+		{"0", 0, true},
+		{"512", 512, true},
+		{" 4k ", 4096, true},
+		{"1K", 1024, true},
+		{"2M", 2 << 20, true},
+		{"3g", 3 << 30, true},
+		{"-1k", -1024, true},
+		{"9223372036854775807", 9223372036854775807, true},
+		{"", 0, false},
+		{"k", 0, false},
+		{"1.5k", 0, false},
+		{"12x", 0, false},
+		{"4 k", 0, false},
+		{"9223372036854775808", 0, false},
+		{"9223372036854775807k", 0, false},
+	}
+	for _, tc := range cases {
+		got, err := parseBytes(tc.in)
+		if (err == nil) != tc.ok {
+			t.Errorf("parseBytes(%q) error = %v, want ok = %v", tc.in, err, tc.ok)
+			continue
+		}
+		if err == nil && got != tc.want {
+			t.Errorf("parseBytes(%q) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestParsePortRange(t *testing.T) {
+	cases := []struct {
+		in     string
+		lo, hi int
+		ok     bool
+	}{
+		{"80-90", 80, 90, true},
+		{"0-0", 0, 0, true},
+		{"65535-65535", 65535, 65535, true},
+		{"80", 0, 0, false},
+		{"-80", 0, 0, false},
+		{"80-", 0, 0, false},
+		{"a-b", 0, 0, false},
+		{"80-90-100", 0, 0, false},
+		{" 80-90", 0, 0, false},
+	}
+	for _, tc := range cases {
+		lo, hi, err := parsePortRange(tc.in)
+		if (err == nil) != tc.ok {
+			t.Errorf("parsePortRange(%q) error = %v, want ok = %v", tc.in, err, tc.ok)
+			continue
+		}
+		if err == nil && (lo != tc.lo || hi != tc.hi) {
+			t.Errorf("parsePortRange(%q) = %d-%d, want %d-%d", tc.in, lo, hi, tc.lo, tc.hi)
+		}
 	}
 }

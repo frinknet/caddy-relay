@@ -468,7 +468,8 @@ rejects unknown sub-directives.
 `parseInterceptBlock` returns an encoded `url:<path>` for the inline form. For
 a block, it accepts a `template` sub-directive with either a heredoc argument
 (kept verbatim) or a nested block. A nested block is rebuilt by joining tokens
-on the same Caddyfile line with one space and breaking on a new line. An empty
+on the same Caddyfile line with one space and breaking on a new line, so a run
+of spaces survives only inside a quoted token. An empty
 template is an error.
 
 `compileIntercept` decodes the URL form directly. For the template form it
@@ -479,7 +480,8 @@ registers stub implementations of every template function, parses with
 ### Helpers and guards
 
 `atoi` is a plain integer parse. `parseBytes` accepts a `K`, `M` or `G` suffix
-(powers of 1024) case-insensitively. `parsePortRange` requires `LO-HI`.
+(powers of 1024) case-insensitively and rejects a value that would overflow
+`int64` once the suffix is applied. `parsePortRange` requires `LO-HI`.
 `stripNetworkPrefix` removes a leading `network/` from an address.
 
 Interface guards assert that `Relay` is a Caddy app and that both directives
@@ -498,8 +500,9 @@ are middleware handlers.
   evicting idle channels.
 - Channels close themselves when idle according to `IdleTTL`/`Retain`, and the
   hub never runs a separate sweeper.
-- TURN requires a secret and an external IP; TLS additionally requires a
-  certificate and key. Relays bind `turn_bind` and advertise `turn_external_ip`.
+- TURN requires a secret and an external IP; TLS additionally requires either a
+  certificate pair or a `turn_tls_domain` the `tls` app manages. Relays bind
+  `turn_bind` and advertise `turn_external_ip`.
 - Relative intercept URLs resolve against the server that received the
   message; absolute URLs are used unchanged.
 - Directive publishes exclude the sender; template and SSE publishes do not.
