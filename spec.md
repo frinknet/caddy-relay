@@ -77,7 +77,8 @@ A channel rule block accepts:
 
 `relay_ws` and `relay_sse` are HTTP handler directives. Both accept
 `subscribe <pattern>`, `publish <pattern>` and `intercept ...`. `relay_ws`
-additionally accepts `origins <pattern> ...` for WebSocket origin checks.
+additionally accepts `origins <pattern> ...` for WebSocket origin checks. A
+pattern without a port admits that host on any port; one with a port pins it.
 
 `relay_ws` requires both `subscribe` and `publish`. `relay_sse` requires
 `subscribe`; `publish` is optional because a `GET` stream is read-only, but a

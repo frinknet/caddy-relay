@@ -3,8 +3,13 @@ package ws
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"path"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -27,8 +32,15 @@ type Config struct {
 
 // Serve handles an HTTP request for the relay_ws directive.
 func Serve(cfg Config, bus hub.Bus, w http.ResponseWriter, r *http.Request) {
+	if err := checkOrigin(r, cfg.OriginPatterns); err != nil {
+		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		return
+	}
 	conn, err := websocket.Accept(upgradeWriter(w), r, &websocket.AcceptOptions{
-		OriginPatterns: cfg.OriginPatterns,
+		// Origin is verified above: the library matches patterns against the
+		// origin host including its port, so a port-less pattern such as
+		// example.com could never admit example.com:8443.
+		InsecureSkipVerify: true,
 	})
 	if err != nil {
 		return
@@ -99,6 +111,63 @@ func Serve(cfg Config, bus hub.Bus, w http.ResponseWriter, r *http.Request) {
 		}
 		bus.Publish(ctx, []string{cfg.Publish.Pattern}, out, sub.ID)
 	}
+}
+
+// checkOrigin reports whether the request may connect, given the Origin it
+// presents. A request without an Origin (a non-browser client) and a
+// same-origin request are always allowed. Every other origin must match one of
+// the patterns: a pattern that names a port matches that port only, while a
+// port-less pattern matches the origin host whatever its port, so
+// `example.com` admits `example.com:8443` and `*.example.com` admits
+// `a.example.com:8443`.
+func checkOrigin(r *http.Request, patterns []string) error {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return nil
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return fmt.Errorf("failed to parse Origin header %q: %w", origin, err)
+	}
+	if strings.EqualFold(r.Host, u.Host) {
+		return nil
+	}
+	if u.Host == "" {
+		return fmt.Errorf("request Origin %q is not a valid URL with a host", origin)
+	}
+	host := strings.ToLower(u.Host)
+	hostname := hostWithoutPort(host)
+	for _, pattern := range patterns {
+		p := strings.ToLower(pattern)
+		if matched, err := filepath.Match(p, host); err == nil && matched {
+			return nil
+		}
+		if hostname != host && !patternHasPort(p) {
+			if matched, err := filepath.Match(strings.Trim(p, "[]"), hostname); err == nil && matched {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("request Origin %q is not authorized for Host %q", u.Host, r.Host)
+}
+
+// hostWithoutPort strips the port and the IPv6 brackets from a host, returning
+// the input unchanged when it has no port.
+func hostWithoutPort(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return strings.Trim(h, "[]")
+	}
+	return strings.Trim(host, "[]")
+}
+
+// patternHasPort reports whether an origin pattern pins a port. IPv6 patterns
+// are bracketed, so a colon only counts after the closing bracket.
+func patternHasPort(pattern string) bool {
+	if strings.HasPrefix(pattern, "[") {
+		_, rest, ok := strings.Cut(pattern, "]")
+		return ok && strings.HasPrefix(rest, ":")
+	}
+	return strings.Contains(pattern, ":")
 }
 
 // rateLimitBurst is how many messages a client may send while over its rate

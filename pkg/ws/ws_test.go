@@ -260,6 +260,69 @@ func TestServeOriginPolicy(t *testing.T) {
 	conn2.Close(websocket.StatusNormalClosure, "")
 }
 
+func TestCheckOrigin(t *testing.T) {
+	req := func(host, origin string) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "http://"+host+"/room-1", nil)
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		return r
+	}
+	tests := []struct {
+		name     string
+		host     string
+		origin   string
+		patterns []string
+		allowed  bool
+	}{
+		{"no origin", "relay.example:8080", "", nil, true},
+		{"same origin", "relay.example:8080", "http://relay.example:8080", nil, true},
+		{"same origin different case", "Relay.Example:8080", "http://relay.example:8080", nil, true},
+		{"same host different port", "relay.example:8080", "http://relay.example:9090", nil, false},
+		{"foreign origin without patterns", "relay.example:8080", "http://evil.example", nil, false},
+		{"port-less pattern admits any port", "relay.example:8080", "https://evil.example:8443", []string{"evil.example"}, true},
+		{"port-less pattern admits default port", "relay.example:8080", "https://evil.example", []string{"evil.example"}, true},
+		{"wildcard subdomain on a ported origin", "relay.example:8080", "https://a.evil.example:8443", []string{"*.evil.example"}, true},
+		{"wildcard subdomain on a nested host", "relay.example:8080", "https://a.b.evil.example:8443", []string{"*.evil.example"}, true},
+		{"port-less pattern does not admit a lookalike", "relay.example:8080", "https://evil.example.net:8443", []string{"evil.example"}, false},
+		{"explicit port pattern matches that port", "relay.example:8080", "https://evil.example:8443", []string{"evil.example:8443"}, true},
+		{"explicit port pattern rejects another port", "relay.example:8080", "https://evil.example:9443", []string{"evil.example:8443"}, false},
+		{"ipv6 origin with a port", "relay.example:8080", "http://[::1]:8443", []string{"[::1]"}, true},
+		{"ipv6 explicit port", "relay.example:8080", "http://[::1]:9443", []string{"[::1]:8443"}, false},
+		{"null origin", "relay.example:8080", "null", []string{"*"}, false},
+		{"malformed origin", "relay.example:8080", "http://[::1", []string{"*"}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkOrigin(req(tc.host, tc.origin), tc.patterns)
+			if allowed := err == nil; allowed != tc.allowed {
+				t.Fatalf("checkOrigin(%q, %q, %v) = %v, want allowed=%v", tc.host, tc.origin, tc.patterns, err, tc.allowed)
+			}
+		})
+	}
+}
+
+// A port-less origin pattern admits the origin on any port, so an operator
+// does not have to name the port or fall back to an allow-everything pattern.
+func TestServeOriginPatternAdmitsPortedOrigin(t *testing.T) {
+	bus := &fakeBus{}
+	cfg := Config{
+		Subscribe:      &hub.SubscribeSpec{Pattern: "room-*"},
+		Publish:        &hub.PublishSpec{Pattern: "room-*"},
+		OriginPatterns: []string{"evil.example"},
+	}
+	srv := serveTest(t, bus, cfg)
+	origin := &websocket.DialOptions{HTTPHeader: http.Header{"Origin": {"https://evil.example:8443"}}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http")+"/room-1", origin)
+	if err != nil {
+		t.Fatalf("dial with a ported allowlisted Origin: %v", err)
+	}
+	conn.Close(websocket.StatusNormalClosure, "")
+}
+
 // A client that keeps sending well past its rate limit is closed instead of
 // having its messages dropped forever.
 func TestServeClosesClientThatIgnoresRateLimit(t *testing.T) {

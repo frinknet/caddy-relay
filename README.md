@@ -170,7 +170,7 @@ syntax (`100ms`, `5m`). Numbers must be plain integers.
 | `publish <pattern>` | Target pattern for messages sent from this endpoint. **Required** for `relay_ws`, optional for a read-only SSE `GET` |
 | `intercept /url` | POST each message to an endpoint and use its response. A path is resolved against the server that received the message |
 | `intercept { template { ... } }` | Transform the message with a Go template (or a `<<TAG` heredoc) |
-| `origins <pattern>...` | Extra allowed WebSocket `Origin` hosts (`relay_ws` only) |
+| `origins <pattern>...` | Extra allowed WebSocket `Origin` hosts (`relay_ws` only). A pattern without a port matches that host on any port; a pattern with a port matches that port only. `*` matches any host |
 
 The channel in the request path is checked against `subscribe`; `publish` is a
 separate target, so an endpoint can read `room-*` and write to `lobby`.
@@ -178,7 +178,11 @@ separate target, so an endpoint can read `room-*` and write to `lobby`.
 **WebSocket** (`relay_ws`): the connection subscribes to the path channel,
 receives any buffered replay, then publishes each inbound text frame.
 Binary frames are ignored. The sender is excluded from its own fan-out.
-`Origin` is verified against `Host` unless `origins` lists more hosts.
+`Origin` is verified against `Host` unless `origins` lists the origin's host.
+Patterns follow `filepath.Match` (`*.example.com` matches subdomains) and are
+case-insensitive. A pattern that names no port admits the host on every port,
+so `origins example.com` accepts `https://example.com:8443`; a pattern such as
+`example.com:8443` pins the port.
 
 **SSE** (`relay_sse`): `GET` opens a long-lived `text/event-stream` and
 replays the buffer; `POST` publishes the request body and returns `202`.

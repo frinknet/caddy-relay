@@ -208,6 +208,14 @@ status=$(cat "$tmp/ws_code")
 [ "$status" = 101 ] || fail "the WebSocket handshake returned $status, want 101"
 pass "websocket handshake"
 
+# The fixture allowlists the port-less host 127.0.0.1, which must admit an
+# Origin carrying another port instead of demanding an exact match.
+curl -s -o /dev/null --max-time 3 -w '%{http_code}' \
+  "${ws_headers[@]}" -H 'Origin: http://127.0.0.1:9' "$base/ws/room-1" >"$tmp/ws_code" || true
+status=$(cat "$tmp/ws_code")
+[ "$status" = 101 ] || fail "a port-less allowlisted Origin returned $status, want 101"
+pass "websocket port-less origin pattern"
+
 curl -s -o /dev/null --max-time 3 -w '%{http_code}' \
   "${ws_headers[@]}" -H 'Origin: http://evil.example' "$base/ws/room-1" >"$tmp/ws_code" || true
 status=$(cat "$tmp/ws_code")
