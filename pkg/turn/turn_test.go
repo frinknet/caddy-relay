@@ -118,6 +118,17 @@ func freeUDPPort(t *testing.T) int {
 	return conn.LocalAddr().(*net.UDPAddr).Port
 }
 
+// A TCP port that is free right now, used to reach a listener we started.
+func freeTCPPort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	return listener.Addr().(*net.TCPAddr).Port
+}
+
 // startTURN starts a listener on a free port and returns its address.
 func startTURN(t *testing.T, cfg Config) string {
 	t.Helper()
@@ -320,6 +331,66 @@ func TestListenTLSRejectsMissingKeyPair(t *testing.T) {
 	cfg := Config{ListenAddr: ":0", ExternalIP: "127.0.0.1", AuthSecret: "s", TLSCertFile: "cert.pem"}
 	if _, err := ListenTLS(cfg); err == nil {
 		t.Fatal("ListenTLS accepted a certificate with no key")
+	}
+}
+
+// A TURN allocation over the TLS listener: the server wraps the accepted TCP
+// connection in STUNConn, so a TURN client can allocate through TLS just as it
+// does over UDP.
+func TestAllocateOverTLS(t *testing.T) {
+	const secret = "test-shared-secret"
+	const realm = "test-realm"
+	certPath, keyPath := selfSignedCert(t)
+	port := freeTCPPort(t)
+	closer, err := ListenTLS(Config{
+		ListenAddr:  fmt.Sprintf(":%d", port),
+		ExternalIP:  "127.0.0.1",
+		Realm:       realm,
+		AuthSecret:  secret,
+		TLSCertFile: certPath,
+		TLSKeyFile:  keyPath,
+	})
+	if err != nil {
+		t.Fatalf("ListenTLS: %v", err)
+	}
+	defer closer.Close()
+
+	username, password, err := turn.GenerateLongTermTURNRESTCredentials(secret, "alice", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conn, err := tls.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port), &tls.Config{
+		InsecureSkipVerify: true, //nolint:gosec // test-only
+	})
+	if err != nil {
+		t.Fatalf("TLS dial: %v", err)
+	}
+	defer conn.Close()
+
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	client, err := turn.NewClient(&turn.ClientConfig{
+		STUNServerAddr: addr,
+		TURNServerAddr: addr,
+		Conn:           turn.NewSTUNConn(conn),
+		Username:       username,
+		Password:       password,
+		Realm:          realm,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+	if err := client.Listen(); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	relay, err := client.Allocate()
+	if err != nil {
+		t.Fatalf("allocation over TLS failed: %v", err)
+	}
+	defer relay.Close()
+	if relay.LocalAddr() == nil {
+		t.Fatal("allocation over TLS returned no relay address")
 	}
 }
 
