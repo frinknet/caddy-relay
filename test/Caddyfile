@@ -37,9 +37,11 @@
 		turn_max_allocations 8
 		turn_auth_rate 100
 
+		# TURN over TLS serves the certificate Caddy already manages for
+		# localhost (the HTTPS site below uses `tls internal`), so no
+		# certificate files are mounted.
 		turn_tls :{{TURN_TLS_PORT}}
-		turn_tls_cert /etc/caddy/turn.crt
-		turn_tls_key /etc/caddy/turn.key
+		turn_tls_domain localhost
 
 		channels {
 			max_channels 100

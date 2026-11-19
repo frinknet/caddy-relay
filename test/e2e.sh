@@ -102,11 +102,8 @@ render_config() {
   done
 }
 
-# The certificate TURN over TLS loads.
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
-  -keyout "$tmp/turn.key" -out "$tmp/turn.crt" -days 1 -subj /CN=localhost \
-  -addext subjectAltName=IP:127.0.0.1 >/dev/null 2>&1 ||
-  fail "generating the turn_tls self-signed certificate"
+# TURN over TLS serves the certificate Caddy manages for localhost (the
+# HTTPS site below uses `tls internal`), so no certificate files are mounted.
 
 start_container() {
   local base attempt
@@ -125,8 +122,6 @@ start_container() {
       -p "127.0.0.1:${turn_port}:${turn_port}/udp" \
       -p "127.0.0.1:${turn_tls_port}:${turn_tls_port}/tcp" \
       -v "$tmp/Caddyfile:/srv/www/Caddyfile:ro" \
-      -v "$tmp/turn.crt:/etc/caddy/turn.crt:ro" \
-      -v "$tmp/turn.key:/etc/caddy/turn.key:ro" \
       "$image" 2>/dev/null); then
       return 0
     fi
@@ -234,10 +229,19 @@ od -An -tx1 "$tmp/stun.resp" | tr -d ' \n' | grep -q 0020 ||
   fail "the STUN response carries no XOR-MAPPED-ADDRESS"
 pass "stun binding"
 
-# TURN over TLS: the listener completes a handshake and serves the configured
-# certificate. Allocations are covered by pkg/turn.
-openssl s_client -connect "127.0.0.1:$turn_tls" -servername localhost </dev/null >"$tmp/turn_tls" 2>&1 || true
-grep -q 'BEGIN CERTIFICATE' "$tmp/turn_tls" || fail "TURN over TLS did not serve a certificate"
-pass "turn over tls listener"
+# TURN over TLS: the listener completes a handshake and serves the certificate
+# Caddy issued for localhost. Issuance is asynchronous, so retry briefly.
+# Allocations are covered by pkg/turn.
+served=0
+for _ in $(seq 1 30); do
+  openssl s_client -connect "127.0.0.1:$turn_tls" -servername localhost </dev/null >"$tmp/turn_tls" 2>&1 || true
+  if grep -q 'BEGIN CERTIFICATE' "$tmp/turn_tls"; then
+    served=1
+    break
+  fi
+  sleep 0.5
+done
+[ "$served" = 1 ] || fail "TURN over TLS did not serve a certificate from Caddy's cache"
+pass "turn over tls listener from certmagic"
 
 printf '\nall container checks passed\n'

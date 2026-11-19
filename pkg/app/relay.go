@@ -7,6 +7,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,6 +22,7 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"github.com/caddyserver/caddy/v2/modules/caddytls"
 	"go.uber.org/zap"
 
 	"github.com/frinknet/caddy-relay/pkg/hub"
@@ -106,6 +108,11 @@ func parseRelayBlock(d *caddyfile.Dispenser, cfg *Relay) error {
 				return d.ArgErr()
 			}
 			cfg.TurnTLSKey = d.Val()
+		case "turn_tls_domain":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			cfg.TurnTLSDomain = d.Val()
 		case "turn_relay_ports":
 			if !d.NextArg() {
 				return d.ArgErr()
@@ -291,12 +298,15 @@ const turnRealm = "caddy-relay"
 // Its exported fields are its JSON configuration; the unexported fields are
 // runtime state and are never serialised.
 type Relay struct {
-	StunAddr       string `json:"stun,omitempty"`
-	TurnAddr       string `json:"turn,omitempty"`
-	TurnSecret     string `json:"turn_secret,omitempty"`
-	TurnTLSAddr    string `json:"turn_tls,omitempty"`
-	TurnTLSCert    string `json:"turn_tls_cert,omitempty"`
-	TurnTLSKey     string `json:"turn_tls_key,omitempty"`
+	StunAddr    string `json:"stun,omitempty"`
+	TurnAddr    string `json:"turn,omitempty"`
+	TurnSecret  string `json:"turn_secret,omitempty"`
+	TurnTLSAddr string `json:"turn_tls,omitempty"`
+	TurnTLSCert string `json:"turn_tls_cert,omitempty"`
+	TurnTLSKey  string `json:"turn_tls_key,omitempty"`
+	// TurnTLSDomain serves the TLS listener's certificate from Caddy's
+	// certmagic cache instead of from a certificate file pair.
+	TurnTLSDomain  string `json:"turn_tls_domain,omitempty"`
 	TurnRelayMin   int    `json:"turn_relay_min,omitempty"`
 	TurnRelayMax   int    `json:"turn_relay_max,omitempty"`
 	TurnExternalIP string `json:"turn_external_ip,omitempty"`
@@ -312,6 +322,7 @@ type Relay struct {
 	stun    io.Closer
 	turn    io.Closer
 	turnTLS io.Closer
+	tlsCert func(*tls.ClientHelloInfo) (*tls.Certificate, error)
 	log     *zap.Logger
 }
 
@@ -326,7 +337,43 @@ func (r *Relay) Provision(ctx caddy.Context) error {
 	r.log = ctx.Logger()
 	r.hub = hub.NewHub(r.Channels)
 	r.hub.SetLogger(zapLog{ctx.Logger().Sugar()})
+	if r.usesCachedCertificate() {
+		tlsApp, err := ctx.App("tls")
+		if err != nil {
+			return fmt.Errorf("relay: turn_tls_domain needs Caddy's tls app to manage %q: %w", r.TurnTLSDomain, err)
+		}
+		if err := tlsApp.(*caddytls.TLS).Manage(map[string]struct{}{r.TurnTLSDomain: {}}); err != nil {
+			return fmt.Errorf("relay: turn_tls_domain: %w", err)
+		}
+		r.tlsCert = turnCertificate(r.TurnTLSDomain)
+	}
 	return nil
+}
+
+// usesCachedCertificate reports whether the TLS listener takes its
+// certificate from Caddy's certificate cache. A certificate file pair, when
+// given, wins over turn_tls_domain.
+func (r *Relay) usesCachedCertificate() bool {
+	return r.TurnTLSAddr != "" && r.TurnTLSDomain != "" &&
+		r.TurnTLSCert == "" && r.TurnTLSKey == ""
+}
+
+// certificateCacheLookup is caddytls.AllMatchingCertificates in production.
+// Tests replace it with a fixed cache.
+var certificateCacheLookup = caddytls.AllMatchingCertificates
+
+// turnCertificate returns the GetCertificate func for a TURN TLS listener,
+// serving name from Caddy's certmagic cache. The cache is populated by the
+// tls app's automation, which Provision asks for; a handshake that arrives
+// before the certificate is issued fails until it lands.
+func turnCertificate(name string) func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+	return func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+		for _, cert := range certificateCacheLookup(name) {
+			c := cert.Certificate
+			return &c, nil
+		}
+		return nil, fmt.Errorf("relay: no certificate for %q in Caddy's cache yet", name)
+	}
 }
 
 // zapLog adapts Caddy's logger to hub.Logger.
@@ -346,8 +393,15 @@ func (r *Relay) Validate() error {
 	if r.TurnExternalIP == "" {
 		return fmt.Errorf("relay: turn requires turn_external_ip")
 	}
-	if r.TurnTLSAddr != "" && (r.TurnTLSCert == "" || r.TurnTLSKey == "") {
-		return fmt.Errorf("relay: turn_tls requires turn_tls_cert and turn_tls_key")
+	if r.TurnTLSAddr != "" {
+		switch {
+		case r.TurnTLSCert != "" || r.TurnTLSKey != "":
+			if r.TurnTLSCert == "" || r.TurnTLSKey == "" {
+				return fmt.Errorf("relay: turn_tls requires both turn_tls_cert and turn_tls_key")
+			}
+		case r.TurnTLSDomain == "":
+			return fmt.Errorf("relay: turn_tls requires turn_tls_cert and turn_tls_key, or turn_tls_domain")
+		}
 	}
 	return nil
 }
@@ -366,6 +420,7 @@ func (r *Relay) turnConfig(addr string) turn.Config {
 
 		MaxAllocations: r.TurnMaxAllocations,
 		AuthRatePerIP:  r.TurnAuthRate,
+		GetCertificate: r.tlsCert,
 	}
 }
 

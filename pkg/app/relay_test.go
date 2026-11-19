@@ -1,6 +1,7 @@
 package app
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig"
+	"github.com/caddyserver/certmagic"
 
 	"github.com/frinknet/caddy-relay/pkg/hub"
 )
@@ -216,6 +218,86 @@ func TestRelayWSOriginsParse(t *testing.T) {
 	app := string(appJSON(t, raw, "http"))
 	if !strings.Contains(app, `"origins":["example.com","*.example.com"]`) {
 		t.Errorf("http app JSON is missing the origins list:\n%s", app)
+	}
+}
+
+func TestTurnTLSDomainParses(t *testing.T) {
+	raw := adapt(t, "{\n\trelay {\n\t\tturn_tls :5349\n\t\tturn_tls_domain turn.example.com\n\t}\n}\n:8080 {\n\trespond \"ok\"\n}\n")
+	var got Relay
+	if err := json.Unmarshal(appJSON(t, raw, "relay"), &got); err != nil {
+		t.Fatalf("unmarshal apps.relay: %v", err)
+	}
+	if got.TurnTLSDomain != "turn.example.com" {
+		t.Errorf("TurnTLSDomain = %q, want turn.example.com", got.TurnTLSDomain)
+	}
+}
+
+// turn_tls takes its certificate from a file pair or from Caddy's certmagic
+// cache; the file pair wins when both are configured.
+func TestUsesCachedCertificate(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  Relay
+		want bool
+	}{
+		{"no tls listener", Relay{TurnTLSDomain: "turn.example.com"}, false},
+		{"domain only", Relay{TurnTLSAddr: ":5349", TurnTLSDomain: "turn.example.com"}, true},
+		{"certificate files", Relay{TurnTLSAddr: ":5349", TurnTLSCert: "cert.pem", TurnTLSKey: "key.pem"}, false},
+		{"files and domain", Relay{TurnTLSAddr: ":5349", TurnTLSCert: "cert.pem", TurnTLSKey: "key.pem", TurnTLSDomain: "turn.example.com"}, false},
+	}
+	for _, tc := range cases {
+		if got := tc.cfg.usesCachedCertificate(); got != tc.want {
+			t.Errorf("%s: usesCachedCertificate() = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestTurnTLSValidationAcceptsEitherCertificateSource(t *testing.T) {
+	base := Relay{TurnTLSAddr: ":5349", TurnSecret: "s", TurnExternalIP: "203.0.113.1"}
+	filePair := base
+	filePair.TurnTLSCert, filePair.TurnTLSKey = "cert.pem", "key.pem"
+	domain := base
+	domain.TurnTLSDomain = "turn.example.com"
+	halfPair := base
+	halfPair.TurnTLSCert = "cert.pem"
+
+	for name, cfg := range map[string]Relay{"file pair": filePair, "domain": domain} {
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("%s failed validation: %v", name, err)
+		}
+	}
+	if err := base.Validate(); err == nil {
+		t.Error("turn_tls without a certificate source passed validation")
+	}
+	if err := halfPair.Validate(); err == nil {
+		t.Error("turn_tls with only a certificate file passed validation")
+	}
+}
+
+// turnCertificate serves the cached certificate for the configured name and
+// reports a handshake error until certmagic has one.
+func TestTurnCertificateFromCache(t *testing.T) {
+	orig := certificateCacheLookup
+	t.Cleanup(func() { certificateCacheLookup = orig })
+
+	want := certmagic.Certificate{Certificate: tls.Certificate{Certificate: [][]byte{{1, 2, 3}}}}
+	certificateCacheLookup = func(name string) []certmagic.Certificate {
+		if name != "turn.example.com" {
+			t.Errorf("cache lookup for %q, want turn.example.com", name)
+		}
+		return []certmagic.Certificate{want}
+	}
+	got, err := turnCertificate("turn.example.com")(nil)
+	if err != nil {
+		t.Fatalf("GetCertificate: %v", err)
+	}
+	if len(got.Certificate) != 1 || len(got.Certificate[0]) != 3 {
+		t.Errorf("GetCertificate returned %v, want the cached certificate", got)
+	}
+
+	certificateCacheLookup = func(string) []certmagic.Certificate { return nil }
+	if _, err := turnCertificate("turn.example.com")(nil); err == nil {
+		t.Error("GetCertificate succeeded with an empty cache")
 	}
 }
 

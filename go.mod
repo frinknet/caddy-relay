@@ -4,6 +4,7 @@ go 1.27.4
 
 require (
 	github.com/caddyserver/caddy/v2 v2.11.9
+	github.com/caddyserver/certmagic v0.25.6
 	github.com/coder/websocket v1.8.12
 	github.com/pion/stun/v3 v3.0.0
 	github.com/pion/turn/v4 v4.0.0
@@ -29,7 +30,6 @@ require (
 	github.com/aryann/difflib v0.0.0-20210328193216-ff5ff6dc229b // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.25.0 // indirect
-	github.com/caddyserver/certmagic v0.25.6 // indirect
 	github.com/caddyserver/zerossl v0.1.6 // indirect
 	github.com/ccoveille/go-safecast/v2 v2.0.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect

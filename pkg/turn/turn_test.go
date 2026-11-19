@@ -40,6 +40,40 @@ func TestListenTLSRequiresCertificate(t *testing.T) {
 	}
 }
 
+// A GetCertificate source (the certmagic path) is enough on its own: no
+// certificate files are needed.
+func TestListenTLSUsesGetCertificate(t *testing.T) {
+	certPath, keyPath := selfSignedCert(t)
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := freeUDPPort(t)
+	closer, err := ListenTLS(Config{
+		ListenAddr: fmt.Sprintf(":%d", port),
+		ExternalIP: "127.0.0.1",
+		AuthSecret: "test-shared-secret",
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			return &cert, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("ListenTLS: %v", err)
+	}
+	defer closer.Close()
+
+	conn, err := tls.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port), &tls.Config{
+		InsecureSkipVerify: true, //nolint:gosec // test-only
+	})
+	if err != nil {
+		t.Fatalf("TLS dial: %v", err)
+	}
+	defer conn.Close()
+	if got := conn.ConnectionState().PeerCertificates[0].Subject.CommonName; got != "localhost" {
+		t.Errorf("served certificate CN = %q, want localhost", got)
+	}
+}
+
 func TestRelayGeneratorSelection(t *testing.T) {
 	ip := net.ParseIP("127.0.0.1")
 	static, ok := newRelayGenerator(Config{}, ip).(*turn.RelayAddressGeneratorStatic)

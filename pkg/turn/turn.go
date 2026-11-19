@@ -26,6 +26,10 @@ type Config struct {
 	AuthSecret   string // shared secret for TURN REST credentials; required
 	TLSCertFile  string // TLS listener certificate, when ListenAddr is TCP
 	TLSKeyFile   string // TLS listener private key, when ListenAddr is TCP
+	// GetCertificate supplies the TLS listener's certificate when no file
+	// pair is configured. The Caddy layer uses it to serve certificates from
+	// Caddy's certmagic cache, so turn_tls does not need files on disk.
+	GetCertificate func(*tls.ClientHelloInfo) (*tls.Certificate, error)
 
 	// MaxAllocations caps concurrent allocations across the listener; 0 =
 	// unlimited. One allocation already allows a client to relay arbitrary
@@ -87,18 +91,24 @@ func ListenTLS(cfg Config) (io.Closer, error) {
 	if cfg.AuthSecret == "" {
 		return nil, fmt.Errorf("turn: AuthSecret is required")
 	}
-	if cfg.TLSCertFile == "" || cfg.TLSKeyFile == "" {
-		return nil, fmt.Errorf("turn: TLS listener requires a certificate and key")
-	}
-	cert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
-	if err != nil {
-		return nil, fmt.Errorf("turn: loading TLS key pair: %w", err)
+	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	switch {
+	case cfg.TLSCertFile != "" || cfg.TLSKeyFile != "":
+		if cfg.TLSCertFile == "" || cfg.TLSKeyFile == "" {
+			return nil, fmt.Errorf("turn: TLS listener requires a certificate and key")
+		}
+		cert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("turn: loading TLS key pair: %w", err)
+		}
+		tlsCfg.Certificates = []tls.Certificate{cert}
+	case cfg.GetCertificate != nil:
+		tlsCfg.GetCertificate = cfg.GetCertificate
+	default:
+		return nil, fmt.Errorf("turn: TLS listener requires a certificate")
 	}
 	_, addr := splitNetworkAddr(cfg.ListenAddr)
-	listener, err := tls.Listen("tcp", addr, &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
-	})
+	listener, err := tls.Listen("tcp", addr, tlsCfg)
 	if err != nil {
 		return nil, err
 	}

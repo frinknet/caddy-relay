@@ -47,8 +47,11 @@ rejected.
             turn udp/:5349
             turn_secret a-long-random-shared-secret
             turn_tls :5349
-            turn_tls_cert /etc/caddy/turn.crt
-            turn_tls_key  /etc/caddy/turn.key
+            # Certificate from Caddy's own TLS automation ...
+            turn_tls_domain relay.example.com
+            # ... or from a certificate and key file:
+            # turn_tls_cert /etc/caddy/turn.crt
+            # turn_tls_key  /etc/caddy/turn.key
             turn_external_ip 203.0.113.1
             turn_bind 0.0.0.0
             turn_relay_ports 49152-65535
@@ -84,7 +87,8 @@ rejected.
 | `turn <addr>` | UDP listen address for the TURN relay (`off` to disable) |
 | `turn_secret <secret>` | Shared secret for TURN REST credentials. **Required** whenever `turn` or `turn_tls` is set |
 | `turn_tls <addr>` | TLS (TCP) listen address for `turns:`, e.g. `:5349` |
-| `turn_tls_cert`, `turn_tls_key` | Certificate and key files for `turn_tls` |
+| `turn_tls_domain <name>` | Serve `turn_tls` with the certificate Caddy manages for `<name>` (requires Caddy's `tls` app, e.g. a site using `tls`) |
+| `turn_tls_cert`, `turn_tls_key` | Certificate and key files for `turn_tls`; used instead of `turn_tls_domain` when both are set |
 | `turn_external_ip <ip>` | Public IP advertised in TURN relay addresses. Required for `turn`/`turn_tls` |
 | `turn_bind <addr>` | Local address relays bind to (default `0.0.0.0`). Separate from the advertised IP so containers and NAT work |
 | `turn_relay_ports LO-HI` | Port range TURN allocates relays from (default: any free port) |
@@ -238,9 +242,16 @@ application so the secret never reaches the browser:
 
 `turn_external_ip` must be the publicly routable IP (it is advertised in relay
 addresses), and `turn_relay_ports` confines allocations to a range you can
-open in the firewall. `turn_tls` listens with TLS over TCP using
-`turn_tls_cert`/`turn_tls_key`; supplying the pair as files keeps certificate
-management outside Caddy for now.
+open in the firewall.
+
+`turn_tls` listens with TLS over TCP. `turn_tls_domain` serves the certificate
+Caddy already manages for that name: `Provision` asks Caddy's `tls` app to
+manage it, which must therefore be in the config (a site using `tls`, or a
+`tls { ... }` global block with a matching automation policy), and handshakes
+use the certificate from Caddy's certmagic cache. Issuance is asynchronous, so
+the first handshakes can fail until the certificate lands.
+`turn_tls_cert`/`turn_tls_key` remain available and take precedence when both
+are set, for deployments that manage the files elsewhere.
 
 ## Clients
 

@@ -36,7 +36,8 @@ The global option accepts the following sub-directives:
 | `turn <addr>` | TURN UDP listen address; `off` disables it |
 | `turn_secret <secret>` | Shared secret for TURN REST credentials; required when TURN is enabled |
 | `turn_tls <addr>` | TURN over TLS listen address; `off` disables it |
-| `turn_tls_cert <path>` | Certificate for the TLS listener |
+| `turn_tls_domain <name>` | Serve the TLS listener with the certificate Caddy manages for `<name>`; requires the `tls` app |
+| `turn_tls_cert <path>` | Certificate for the TLS listener (takes precedence over `turn_tls_domain`) |
 | `turn_tls_key <path>` | Private key for the TLS listener |
 | `turn_relay_ports <lo>-<hi>` | Port range TURN allocates relays from |
 | `turn_external_ip <ip>` | Address advertised in relay allocations; required when TURN is enabled |
@@ -285,15 +286,17 @@ Malformed requests and build failures are silently skipped.
 
 `Config` describes a TURN listener: listen address, realm, external IP, bind
 address, optional relay port range, the REST authentication secret, the TLS
-certificate pair, and the two abuse limits (`MaxAllocations`, `AuthRatePerIP`).
+certificate source (files or a `GetCertificate` func), and the two abuse
+limits (`MaxAllocations`, `AuthRatePerIP`).
 
 - `Listen` requires `AuthSecret`, binds a UDP socket, validates
   `ExternalIP`, and creates a pion TURN server with
   `LongTermTURNRESTAuthHandler`. There is no anonymous access. It returns the
   server as an `io.Closer`.
-- `ListenTLS` additionally requires a certificate and key. It loads the key
-  pair, binds a TLS TCP listener with a minimum of TLS 1.2 and creates the same
-  server with a listener config.
+- `ListenTLS` requires a certificate source: it loads `TLSCertFile` and
+  `TLSKeyFile` when set, otherwise it installs `GetCertificate`. It binds a
+  TLS TCP listener with a minimum of TLS 1.2 and creates the same server with
+  a listener config.
 - `newRelayGenerator` binds relays to `BindAddr` (default `0.0.0.0`) but
   advertises `ExternalIP`. It uses `RelayAddressGeneratorPortRange` when both
   relay port bounds are set and valid, otherwise the static generator. With
@@ -395,12 +398,14 @@ the listener closers and the logger.
 
 - The module ID is `relay`.
 - `Provision` creates the hub from `Channels` and installs a zap-backed
-  `hub.Logger`.
+  `hub.Logger`. With `turn_tls_domain` and no certificate files it fetches the
+  `tls` app, asks it to manage the name, and installs a `GetCertificate` func
+  that serves the certificate from `caddytls.AllMatchingCertificates`.
 - `Validate` is a no-op when TURN is disabled; otherwise it requires
-  `turn_secret` and `turn_external_ip`, and requires a certificate and key for
-  `turn_tls`.
+  `turn_secret` and `turn_external_ip`, and requires either a certificate pair
+  or `turn_tls_domain` for `turn_tls`.
 - `turnConfig` maps the app fields to `turn.Config` with the fixed realm
-  `caddy-relay`.
+  `caddy-relay`, including the certificate source.
 - `Start` starts the hub, then the STUN listener, the UDP TURN listener and the
   TLS TURN listener, in that order. A failure aborts startup.
 - `Stop` closes the listeners and then the hub.
