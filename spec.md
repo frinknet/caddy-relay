@@ -524,8 +524,10 @@ are middleware handlers.
 
 All of these run in CI (`.github/workflows/ci.yml`), which also builds the
 image. The end-to-end suite is a bash script that orchestrates the container
-and checks it with `curl`, `openssl` and a raw STUN datagram; nothing has been
-exercised from a real browser or behind a load balancer.
+and checks it with `curl`, `openssl` and a raw STUN datagram; it then runs the
+Go protocol client in `test/client` in the builder image sharing the fixture's
+network namespace, which exchanges WebSocket frames and allocates a TURN relay.
+Nothing has been exercised from a real browser or behind a load balancer.
 
 ## Open items
 

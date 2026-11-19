@@ -1,10 +1,11 @@
 # caddy-relay container end-to-end config.
 #
-# test/e2e.sh substitutes the {{PLACEHOLDER}} ports (picked from a free
-# block at runtime so the test does not collide with whatever else is on the
-# host), mounts the result at /srv/www/Caddyfile (the image's working
-# directory, where `caddy run` looks) in the image built by
-# ./build.sh, and drives the container over published ports:
+# test/e2e.sh substitutes the {{PLACEHOLDER}} ports and the TURN secret
+# (picked from a free block at runtime so the test does not collide with
+# whatever else is on the host), mounts the result at
+# /srv/www/Caddyfile (the image's working directory, where `caddy run` looks)
+# in the image built by ./build.sh, and drives the container over published
+# ports:
 #
 #   - STUN and TURN (UDP) with REST credentials, plus TURN over TLS
 #   - channel limits: max_channels, max_participants, max_participants_per_ip,
@@ -26,7 +27,7 @@
 		stun udp/:{{STUN_PORT}}
 
 		turn udp/:{{TURN_PORT}}
-		turn_secret e2e-shared-secret
+		turn_secret {{TURN_SECRET}}
 		turn_external_ip 127.0.0.1
 		# Relays bind every interface so the published relay ports work, while
 		# clients are told to dial 127.0.0.1.

@@ -17,9 +17,12 @@
 #   - the WebSocket handshake, including the origin policy
 #   - a STUN binding request over UDP
 #   - the TURN-over-TLS listener and its certificate
+#   - WebSocket frame exchange and a TURN allocation, driven by the Go client
+#     in test/client
 #
-# Anything that needs a protocol client (WebSocket frames, TURN allocations,
-# STUN attribute parsing) is covered by the package tests in pkg/.
+# The Go client needs a protocol stack, so it runs in the builder image while
+# sharing the fixture container's network namespace. The unit layer skips it
+# because the CADDY_RELAY_E2E_* variables are unset there.
 #
 # Usage:
 #   ./test/e2e.sh
@@ -30,9 +33,11 @@ set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 image=${CADDY_RELAY_IMAGE:-caddy-relay:test}
+builder=${CADDY_RELAY_BUILDER_IMAGE:-caddy:2.11.9-builder-alpine}
 name=caddy-relay-e2e-$$
 tmp=$(mktemp -d)
 container=
+turn_secret=e2e-shared-secret
 
 # The URL intercept posts back to the request's own Host, so the host and
 # container ports have to be the same. A free block is picked at runtime and a
@@ -84,8 +89,8 @@ docker image inspect "$image" >/dev/null 2>&1 ||
   fail "image $image is missing; run ./build.sh or set CADDY_RELAY_IMAGE"
 
 # render_config writes the container config with the ports of the current
-# block. Only the placeholders this script knows about are substituted: the
-# Caddyfile also carries Go template syntax for relay_ws.
+# block and the TURN secret. Only the placeholders this script knows about are
+# substituted: the Caddyfile also carries Go template syntax for relay_ws.
 render_config() {
   sed \
     -e "s/{{STUN_PORT}}/$stun_port/g" \
@@ -95,9 +100,10 @@ render_config() {
     -e "s/{{RELAY_MAX}}/$relay_max/g" \
     -e "s/{{HTTP_PORT}}/$http_port/g" \
     -e "s/{{HTTPS_PORT}}/$https_port/g" \
+    -e "s/{{TURN_SECRET}}/$turn_secret/g" \
     "$here/Caddyfile" >"$tmp/Caddyfile"
   local placeholder
-  for placeholder in STUN_PORT TURN_PORT TURN_TLS_PORT RELAY_MIN RELAY_MAX HTTP_PORT HTTPS_PORT; do
+  for placeholder in STUN_PORT TURN_PORT TURN_TLS_PORT RELAY_MIN RELAY_MAX HTTP_PORT HTTPS_PORT TURN_SECRET; do
     grep -q "{{$placeholder}}" "$tmp/Caddyfile" && fail "placeholder $placeholder was not substituted"
   done
 }
@@ -239,7 +245,7 @@ pass "stun binding"
 
 # TURN over TLS: the listener completes a handshake and serves the certificate
 # Caddy issued for localhost. Issuance is asynchronous, so retry briefly.
-# Allocations are covered by pkg/turn.
+# Allocations are covered by test/client below.
 served=0
 for _ in $(seq 1 30); do
   openssl s_client -connect "127.0.0.1:$turn_tls" -servername localhost </dev/null >"$tmp/turn_tls" 2>&1 || true
@@ -251,5 +257,25 @@ for _ in $(seq 1 30); do
 done
 [ "$served" = 1 ] || fail "TURN over TLS did not serve a certificate from Caddy's cache"
 pass "turn over tls listener from certmagic"
+
+# Protocol clients. WebSocket frames and TURN allocations need a real client,
+# so test/client runs in the builder image, sharing this container's network
+# namespace: it reaches every fixture listener on 127.0.0.1 without publishing
+# more ports, including the TURN relay range.
+repo=$(cd "$here/.." && pwd)
+timeout 180s docker run --rm --network "container:$container" \
+  -v "$repo":/src \
+  -v caddy-sf-mod:/mod \
+  -w /src \
+  -e GOMODCACHE=/mod -e GOCACHE=/mod/gocache -e CGO_ENABLED=0 \
+  -e "CADDY_RELAY_E2E_HTTP=$base" \
+  -e "CADDY_RELAY_E2E_TURN=127.0.0.1:$turn_port" \
+  -e "CADDY_RELAY_E2E_STUN=127.0.0.1:$stun" \
+  -e "CADDY_RELAY_E2E_TURN_SECRET=$turn_secret" \
+  -e "CADDY_RELAY_E2E_RELAY_MIN=$relay_min" \
+  -e "CADDY_RELAY_E2E_RELAY_MAX=$relay_max" \
+  "$builder" go test -count=1 -timeout=90s -run TestContainer ./test/client ||
+  fail "the protocol client checks failed"
+pass "websocket frames and turn allocation"
 
 printf '\nall container checks passed\n'

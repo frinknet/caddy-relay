@@ -288,7 +288,13 @@ Caddyfile adapter. `test/e2e.sh` is the end-to-end suite: it renders
 own healthcheck, and then drives the container over published ports (HTTP and
 HTTPS sites, SSE publish/intercept/replay, the channel allow-list, the
 WebSocket handshake and origin policy, a STUN binding request, and the
-TURN-over-TLS listener). It needs Docker and the image:
+TURN-over-TLS listener). It then runs the Go protocol client in `test/client`
+inside the builder image, sharing the fixture's network namespace, to exchange
+WebSocket frames and allocate a TURN relay whose port must come from
+`turn_relay_ports` and carry a relayed STUN request. It needs Docker, the
+image, and the builder image (`CADDY_RELAY_BUILDER_IMAGE`, default
+`caddy:2.11.9-builder-alpine`). The client checks are skipped by the unit
+layer.
 
     ./build.sh && ./test/e2e.sh
 
