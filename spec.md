@@ -18,7 +18,7 @@ test files are covered alongside their packages.
 | `pkg/hub/hub.go` | Channel registry, caps, memory budget and publish fan-out |
 | `pkg/hub/channel.go` | Channel actor: ring buffer, participant queues, replay, idle close and eviction |
 | `pkg/hub/subscribe.go` | Subscription error values |
-| `pkg/hub/net.go` | `ClientIP`: the client host used by per-IP limits |
+| `pkg/hub/net.go` | `ClientIP`, `ClientIPFrom` and `TrustedProxies`: the client host used by per-IP limits |
 | `pkg/stun/stun.go` | Minimal STUN binding server |
 | `pkg/turn/turn.go` | TURN server wrapper: REST credentials, UDP, TLS and relay address generation |
 | `pkg/ws/ws.go` | WebSocket transport |
@@ -276,8 +276,16 @@ closed.
 `ClientIP` turns a `host:port` client address into its host, which is what
 per-IP limits key on. An address without a port is returned unchanged and an
 empty address stays empty, meaning the client is unknown and no per-IP cap
-applies. Forwarding headers are deliberately not consulted: the address is the
-connection's peer.
+applies.
+
+`ClientIPFrom(r, trusted)` is what both transports call. When the request's
+peer is not in `trusted`, the header is ignored and the peer is the client, so
+a client cannot claim an address for itself. When it is, the header's entries
+are walked from the right and the first one that is not itself a trusted proxy
+is the client, which skips anything a client prepended; an entry that is not
+an IP address ends the walk at the last trusted hop or the peer.
+`ParseTrustedProxies` reads `trusted_proxies` once at provision time, taking
+bare addresses as single hosts.
 
 ## `pkg/stun/stun.go`
 

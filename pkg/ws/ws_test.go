@@ -99,6 +99,59 @@ func dial(t *testing.T, srv *httptest.Server, path string) (context.Context, *we
 	return ctx, conn
 }
 
+// dialForwarded dials with an X-Forwarded-For header, the way a proxy in front
+// of the relay would.
+func dialForwarded(t *testing.T, srv *httptest.Server, path, forwarded string) (context.Context, *websocket.Conn) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	header := http.Header{"X-Forwarded-For": {forwarded}}
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http")+path, &websocket.DialOptions{HTTPHeader: header})
+	if err != nil {
+		t.Fatalf("dial %s: %v", path, err)
+	}
+	t.Cleanup(func() { conn.Close(websocket.StatusNormalClosure, "") })
+	return ctx, conn
+}
+
+// A trusted proxy reports the client in X-Forwarded-For, and the subscription
+// must carry that address rather than the proxy's. A header from anyone else
+// is ignored, so a client cannot exempt itself from max_participants_per_ip.
+func TestServeUsesForwardedClientIPFromTrustedProxy(t *testing.T) {
+	trusted, err := hub.ParseTrustedProxies([]string{"127.0.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	untrusted, err := hub.ParseTrustedProxies([]string{"10.0.0.0/8"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name    string
+		proxies hub.TrustedProxies
+		want    string
+	}{
+		{"trusted proxy", trusted, "203.0.113.7"},
+		{"untrusted peer", untrusted, "127.0.0.1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bus := &fakeBus{}
+			srv := serveTest(t, bus, Config{
+				Subscribe:      &hub.SubscribeSpec{Pattern: "room-*"},
+				Publish:        &hub.PublishSpec{Pattern: "room-*"},
+				TrustedProxies: tc.proxies,
+			})
+			dialForwarded(t, srv, "/room-1", "203.0.113.7")
+			bus.subscriber(t)
+			if got := bus.subscribeIP(); got != tc.want {
+				t.Errorf("Subscribe remote IP = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestServeDeliversAndPublishes(t *testing.T) {
 	bus := &fakeBus{}
 	srv := serveTest(t, bus, Config{

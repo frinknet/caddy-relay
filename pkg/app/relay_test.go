@@ -251,6 +251,25 @@ func TestRelayWSOriginsParse(t *testing.T) {
 	}
 }
 
+// trusted_proxies is a global list, because it decides how every transport
+// turns a peer into the client host that per-IP limits key on.
+func TestTrustedProxiesParse(t *testing.T) {
+	raw := adapt(t, "{\n\trelay {\n\t\ttrusted_proxies 10.0.0.0/8\n\t\ttrusted_proxies 192.0.2.7 2001:db8::/32\n\t}\n}\n:8080 {\n\trespond \"ok\"\n}\n")
+	var got Relay
+	if err := json.Unmarshal(appJSON(t, raw, "relay"), &got); err != nil {
+		t.Fatalf("unmarshal apps.relay: %v", err)
+	}
+	want := []string{"10.0.0.0/8", "192.0.2.7", "2001:db8::/32"}
+	if len(got.TrustedProxies) != len(want) {
+		t.Fatalf("TrustedProxies = %q, want %q", got.TrustedProxies, want)
+	}
+	for i := range want {
+		if got.TrustedProxies[i] != want[i] {
+			t.Fatalf("TrustedProxies = %q, want %q", got.TrustedProxies, want)
+		}
+	}
+}
+
 func TestTurnTLSDomainParses(t *testing.T) {
 	raw := adapt(t, "{\n\trelay {\n\t\tturn_tls :5349\n\t\tturn_tls_domain turn.example.com\n\t}\n}\n:8080 {\n\trespond \"ok\"\n}\n")
 	var got Relay
@@ -544,6 +563,16 @@ func TestAdapterErrorPaths(t *testing.T) {
 			"bad auth rate",
 			"{\n\trelay {\n\t\tturn_auth_rate fast\n\t}\n}\n",
 			"turn_auth_rate",
+		},
+		{
+			"trusted_proxies without an argument",
+			"{\n\trelay {\n\t\ttrusted_proxies\n\t}\n}\n",
+			"trusted_proxies",
+		},
+		{
+			"trusted_proxies with a bad entry",
+			"{\n\trelay {\n\t\ttrusted_proxies 10.0.0.0/8 nope\n\t}\n}\n:8080 {\n\trespond \"ok\"\n}\n",
+			"trusted_proxies",
 		},
 		{
 			"negative per-IP participant cap",

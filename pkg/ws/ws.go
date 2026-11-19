@@ -28,6 +28,10 @@ type Config struct {
 	// OriginPatterns lists host patterns allowed in the Origin header, in
 	// addition to the request's own Host. Empty means same-origin only.
 	OriginPatterns []string
+
+	// TrustedProxies are the peers whose X-Forwarded-For header is believed.
+	// Empty means the request's peer is always the client.
+	TrustedProxies hub.TrustedProxies
 }
 
 // Serve handles an HTTP request for the relay_ws directive.
@@ -76,7 +80,7 @@ func Serve(cfg Config, bus hub.Bus, w http.ResponseWriter, r *http.Request) {
 		return conn.Write(wctx, websocket.MessageText, body) == nil
 	}
 
-	remoteIP := hub.ClientIP(r.RemoteAddr)
+	remoteIP := hub.ClientIPFrom(r, cfg.TrustedProxies)
 	sub, err := bus.Subscribe(ctx, channel, remoteIP, send)
 	if err != nil {
 		conn.Close(websocket.StatusInternalError, err.Error())

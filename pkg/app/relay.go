@@ -157,6 +157,12 @@ func parseRelayBlock(d *caddyfile.Dispenser, cfg *Relay) error {
 				return d.Errf("turn_auth_rate: must not be negative")
 			}
 			cfg.TurnAuthRate = n
+		case "trusted_proxies":
+			args := d.RemainingArgs()
+			if len(args) == 0 {
+				return d.ArgErr()
+			}
+			cfg.TrustedProxies = append(cfg.TrustedProxies, args...)
 		case "channels":
 			if err := parseChannelsBlock(d, &cfg.Channels); err != nil {
 				return err
@@ -316,10 +322,14 @@ type Relay struct {
 	TurnMaxAllocations int `json:"turn_max_allocations,omitempty"`
 	// TurnAuthRate caps authenticated TURN requests per second per client IP;
 	// 0 = unlimited.
-	TurnAuthRate int                `json:"turn_auth_rate,omitempty"`
-	Channels     hub.ChannelsConfig `json:"channels,omitempty"`
+	TurnAuthRate int `json:"turn_auth_rate,omitempty"`
+	// TrustedProxies lists the peers whose X-Forwarded-For header is
+	// believed, as addresses or CIDR ranges; empty trusts nobody.
+	TrustedProxies []string           `json:"trusted_proxies,omitempty"`
+	Channels       hub.ChannelsConfig `json:"channels,omitempty"`
 
 	hub     *hub.Hub
+	trusted hub.TrustedProxies
 	stun    io.Closer
 	turn    io.Closer
 	turnTLS io.Closer
@@ -338,6 +348,11 @@ func (r *Relay) Provision(ctx caddy.Context) error {
 	r.log = ctx.Logger()
 	r.hub = hub.NewHub(r.Channels)
 	r.hub.SetLogger(zapLog{ctx.Logger().Sugar()})
+	trusted, err := hub.ParseTrustedProxies(r.TrustedProxies)
+	if err != nil {
+		return fmt.Errorf("relay: trusted_proxies: %w", err)
+	}
+	r.trusted = trusted
 	if r.usesCachedCertificate() {
 		tlsApp, err := ctx.App("tls")
 		if err != nil {
@@ -693,7 +708,7 @@ func (m *RelayWS) Provision(ctx caddy.Context) error {
 		return err
 	}
 	m.relay = r
-	m.cfg = ws.Config{OriginPatterns: m.Origins}
+	m.cfg = ws.Config{OriginPatterns: m.Origins, TrustedProxies: r.trusted}
 	if m.SubscribeStr != "" {
 		m.cfg.Subscribe = &hub.SubscribeSpec{Pattern: m.SubscribeStr}
 	}
@@ -752,7 +767,7 @@ func (m *RelaySSE) Provision(ctx caddy.Context) error {
 		return err
 	}
 	m.relay = r
-	m.cfg = sse.Config{}
+	m.cfg = sse.Config{TrustedProxies: r.trusted}
 	if m.SubscribeStr != "" {
 		m.cfg.Subscribe = &hub.SubscribeSpec{Pattern: m.SubscribeStr}
 	}

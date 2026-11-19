@@ -38,6 +38,12 @@
 		turn_max_allocations 8
 		turn_auth_rate 100
 
+		# Peers allowed to report the client in X-Forwarded-For. The protocol
+		# client shares this container's network namespace, so it appears as
+		# 127.0.0.1, while a request through Docker's published ports appears
+		# as the bridge address and is not trusted.
+		trusted_proxies 127.0.0.1/32
+
 		# TURN over TLS serves the certificate Caddy already manages for
 		# localhost (the HTTPS site below uses `tls internal`), so no
 		# certificate files are mounted.
@@ -63,6 +69,13 @@
 				messages     5
 				participants 50
 				max_size     4K
+				rate_limit   10ms
+				idle_ttl     30s
+			}
+
+			ip-* {
+				messages     5
+				participants 10
 				rate_limit   10ms
 				idle_ttl     30s
 			}
@@ -98,6 +111,21 @@ http://:{{HTTP_PORT}} {
 	# The URL intercept target. Its response replaces the message body.
 	handle /intercept/url {
 		respond `{"intercepted":true}`
+	}
+
+	# The client host as the relay sees it: a trusted X-Forwarded-For is
+	# honored, so the protocol client can assert the forwarded address, and a
+	# header sent through the published ports is ignored.
+	handle /ip/* {
+		relay_sse {
+			subscribe ip-*
+			publish ip-*
+			intercept {
+				template {
+					{{ remote_ip }}
+				}
+			}
+		}
 	}
 
 	# Browser fixtures: a real browser drives WebSocket and EventSource.

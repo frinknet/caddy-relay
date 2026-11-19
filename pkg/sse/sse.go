@@ -16,6 +16,10 @@ type Config struct {
 	Subscribe *hub.SubscribeSpec
 	Intercept *hub.InterceptSpec
 	Publish   *hub.PublishSpec
+
+	// TrustedProxies are the peers whose X-Forwarded-For header is believed.
+	// Empty means the request's peer is always the client.
+	TrustedProxies hub.TrustedProxies
 }
 
 // Serve handles an HTTP request for the relay_sse directive.
@@ -63,7 +67,7 @@ func serveGet(cfg Config, bus hub.Bus, w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	remoteIP := hub.ClientIP(r.RemoteAddr)
+	remoteIP := hub.ClientIPFrom(r, cfg.TrustedProxies)
 
 	// Subscribe before opening the stream. The client's response only arrives
 	// once the subscription exists, so a publish that follows it cannot fall
@@ -126,7 +130,7 @@ func servePost(cfg Config, bus hub.Bus, w http.ResponseWriter, r *http.Request) 
 
 	info := hub.InterceptInfo{
 		Channel:  channel,
-		RemoteIP: hub.ClientIP(r.RemoteAddr),
+		RemoteIP: hub.ClientIPFrom(r, cfg.TrustedProxies),
 		Request:  r,
 	}
 	out, ok := bus.Intercept(r.Context(), cfg.Intercept, body, info)

@@ -167,6 +167,49 @@ func TestGetStreamsThroughWriterWrapper(t *testing.T) {
 	}
 }
 
+// A trusted proxy reports the client in X-Forwarded-For, and the stream's
+// subscription must carry that address rather than the proxy's. A header from
+// anyone else is ignored, so a client cannot claim an address of its choosing.
+func TestGetUsesForwardedClientIPFromTrustedProxy(t *testing.T) {
+	cases := []struct {
+		name  string
+		entry string
+		want  string
+	}{
+		{"trusted proxy", "127.0.0.1", "203.0.113.7"},
+		{"untrusted peer", "10.0.0.0/8", "127.0.0.1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			trusted, err := hub.ParseTrustedProxies([]string{tc.entry})
+			if err != nil {
+				t.Fatal(err)
+			}
+			bus := &fakeBus{}
+			srv := serveTest(t, bus, Config{
+				Subscribe:      &hub.SubscribeSpec{Pattern: "room-*"},
+				TrustedProxies: trusted,
+			})
+			req, err := http.NewRequest(http.MethodGet, srv.URL+"/room-1", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("X-Forwarded-For", "203.0.113.7")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("GET: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200", resp.StatusCode)
+			}
+			if got := bus.subscribeIP(); got != tc.want {
+				t.Errorf("Subscribe remote IP = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestPostPublishes(t *testing.T) {
 	bus := &fakeBus{}
 	srv := serveTest(t, bus, Config{

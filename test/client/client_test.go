@@ -8,6 +8,7 @@
 package client_test
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -41,6 +42,9 @@ func TestContainer(t *testing.T) {
 	})
 	t.Run("channel load", func(t *testing.T) {
 		testChannelLoad(t, base)
+	})
+	t.Run("forwarded client ip", func(t *testing.T) {
+		testForwardedClientIP(t, base)
 	})
 	if os.Getenv("CADDY_RELAY_BROWSER") == "1" {
 		t.Run("browser", func(t *testing.T) {
@@ -195,6 +199,90 @@ func testChannelLoad(t *testing.T, base string) {
 	}
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Errorf("publishing %d messages to %d readers took %v", messages, readers, elapsed)
+	}
+}
+
+// testForwardedClientIP publishes through the /ip endpoint, whose intercept
+// template renders the client host the relay derived for the publisher. This
+// client shares the fixture's network namespace, so its peer is 127.0.0.1,
+// which the fixture lists in trusted_proxies: the address in X-Forwarded-For
+// has to win. Without the header the peer is the client.
+func testForwardedClientIP(t *testing.T, base string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	cases := []struct {
+		name      string
+		forwarded string
+		want      string
+	}{
+		{"trusted X-Forwarded-For", "203.0.113.7", "203.0.113.7"},
+		{"no header", "", "127.0.0.1"},
+	}
+	for _, tc := range cases {
+		channel := fmt.Sprintf("ip-e2e-%d", time.Now().UnixNano())
+		url := base + "/ip/" + channel
+		body, stream := openStream(t, ctx, url)
+		publishSSE(t, ctx, url, tc.forwarded)
+		if got := nextData(t, stream); got != tc.want {
+			body.Close()
+			t.Fatalf("%s: intercept rendered remote_ip %q, want %q", tc.name, got, tc.want)
+		}
+		body.Close()
+	}
+}
+
+// openStream opens an SSE stream and returns its body and a reader over it.
+func openStream(t *testing.T, ctx context.Context, url string) (io.ReadCloser, *bufio.Reader) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("GET %s: status %d, want %d", url, resp.StatusCode, http.StatusOK)
+	}
+	return resp.Body, bufio.NewReader(resp.Body)
+}
+
+// nextData returns the next data frame on a stream.
+func nextData(t *testing.T, stream *bufio.Reader) string {
+	t.Helper()
+	for {
+		line, err := stream.ReadString('\n')
+		if err != nil {
+			t.Fatalf("reading the stream: %v", err)
+		}
+		if data, ok := strings.CutPrefix(line, "data: "); ok {
+			return strings.TrimSuffix(data, "\n")
+		}
+	}
+}
+
+// publishSSE publishes to an SSE endpoint, optionally with an
+// X-Forwarded-For header.
+func publishSSE(t *testing.T, ctx context.Context, url, forwarded string) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader("hello"))
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	if forwarded != "" {
+		req.Header.Set("X-Forwarded-For", forwarded)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST %s: status %d, want %d", url, resp.StatusCode, http.StatusAccepted)
 	}
 }
 

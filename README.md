@@ -58,6 +58,10 @@ rejected.
             turn_max_allocations 1024
             turn_auth_rate 50
 
+            # Peers allowed to report the client in X-Forwarded-For, as
+            # addresses or CIDR ranges. Off by default:
+            # trusted_proxies 10.0.0.0/8 192.0.2.10
+
             channels {
                 max_channels     2000
                 max_participants 10000
@@ -94,6 +98,7 @@ rejected.
 | `turn_relay_ports LO-HI` | Port range TURN allocates relays from (default: any free port) |
 | `turn_max_allocations N` | Cap on concurrent TURN relays (default: unlimited). Each relay can carry any amount of traffic, so this is the TURN connection limit |
 | `turn_auth_rate N` | Cap on authenticated TURN requests per second from one client IP (default: unlimited). Bounds how fast a source can create allocations, permissions and channel bindings |
+| `trusted_proxies <addrs...>` | Peers whose `X-Forwarded-For` is believed, as addresses or CIDR ranges (default: none, so the connection's peer is the client). See *Limits* |
 
 ### `channels { ... }`
 
@@ -125,8 +130,11 @@ syntax (`100ms`, `5m`). Numbers must be plain integers.
   are rejected with `participants cap reached`.
 - **`max_participants_per_ip`** is exact per client host: a subscription over
   the limit for that address is rejected with `max_participants_per_ip
-  reached`, while other addresses are unaffected. The address comes from the
-  connection, not from a header, so a proxy in front has to be trusted.
+  reached`, while other addresses are unaffected. The address is the
+  connection's peer unless that peer is in `trusted_proxies`, in which case
+  the rightmost `X-Forwarded-For` entry that is not itself a trusted proxy is
+  the client. A header from anyone else is ignored, so a client cannot pick
+  its own address.
 - **`rate_limit`** is per connection and comes from the channel's resolved
   rule. A client that sends more than 16 messages while over its limit is
   disconnected with a policy-violation close code.
@@ -230,7 +238,7 @@ the sender, a `publish` from a template includes them.
 | `message` | Raw message body as a string |
 | `data` | Parsed JSON body, or an empty map |
 | `channel` | Channel name |
-| `remote_ip` | Subscriber's client host, without the port |
+| `remote_ip` | Subscriber's client host, without the port (follows `trusted_proxies`) |
 | `request` | The original `*http.Request` |
 | `dict k v ...` | Map built from key/value pairs |
 | `set m k v` | Map with `k` set to `v` |
@@ -286,13 +294,16 @@ fetch("https://example.com/events/room-1", { method: "POST", body: "hello" })
 Caddyfile adapter. `test/e2e.sh` is the end-to-end suite: it renders
 `test/Caddyfile`, runs the built image with Docker, waits for the image's
 own healthcheck, and then drives the container over published ports (HTTP and
-HTTPS sites, SSE publish/intercept/replay, the channel allow-list, the
-WebSocket handshake and origin policy, a STUN binding request, and the
-TURN-over-TLS listener). It then runs the Go protocol client in `test/client`
+HTTPS sites, SSE publish/intercept/replay, the channel allow-list, an
+`X-Forwarded-For` from an untrusted peer being ignored, the WebSocket
+handshake and origin policy, a STUN binding request, and the TURN-over-TLS
+listener). It then runs the Go protocol client in `test/client`
 inside the builder image, sharing the fixture's network namespace, to exchange
 WebSocket frames, hold 40 WebSocket readers on one channel while a 41st stops
-reading as 100 messages are published over SSE, and allocate a TURN relay
-whose port must come from `turn_relay_ports` and carry a relayed STUN request. It needs Docker, the image, and the builder image
+reading as 100 messages are published over SSE, check that a trusted
+`X-Forwarded-For` is what the intercept renders as `remote_ip`, and allocate a
+TURN relay whose port must come from `turn_relay_ports` and carry a relayed
+STUN request. It needs Docker, the image, and the builder image
 (`CADDY_RELAY_BUILDER_IMAGE`, default `caddy:2.11.9-builder-alpine`). The
 client checks are skipped by the unit layer.
 
@@ -305,8 +316,12 @@ package, so it is opt-in locally; CI always sets it.
     ./build.sh && ./test/e2e.sh
     CADDY_RELAY_BROWSER=1 ./test/e2e.sh   # add the browser check
 
-CI runs all of it, including the image build and the browser check. The plugin
-has not been run behind a load balancer.
+CI runs all of it, including the image build and the browser check.
+
+Behind a load balancer or reverse proxy, add it to `trusted_proxies` so
+`max_participants_per_ip` and `remote_ip` see the forwarded client instead of
+the proxy. Trust only addresses you control: the header from any other peer is
+ignored.
 
 The global `relay` option registers the app as `apps.relay`, so the hub and
 the STUN/TURN listeners start even in a config with no `relay_ws`/`relay_sse`

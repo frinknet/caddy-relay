@@ -14,6 +14,7 @@
 #   - the HTTP and HTTPS sites
 #   - SSE: live publish, URL intercept, and replay for a late subscriber
 #   - a channel outside the subscribe pattern (403 on SSE and WebSocket)
+#   - an X-Forwarded-For that arrives from an untrusted peer is ignored
 #   - the WebSocket handshake, including the origin policy
 #   - a STUN binding request over UDP
 #   - the TURN-over-TLS listener and its certificate
@@ -164,6 +165,9 @@ turn_tls=$turn_tls_port
 [ -n "$http" ] || fail "the HTTP port was not published"
 [ -n "$https" ] || fail "the HTTPS port was not published"
 base="http://127.0.0.1:$http"
+if [ "${KEEP:-0}" = 1 ]; then
+  printf 'fixture: %s (container %s)\n' "$base" "$container"
+fi
 
 status=$(curl -s -o "$tmp/body" -w '%{http_code}' "$base/")
 [ "$status" = 200 ] || fail "GET / returned $status, want 200"
@@ -203,6 +207,37 @@ pass "sse replay"
 status=$(curl -s -o /dev/null -w '%{http_code}' "$base/events/other-1")
 [ "$status" = 403 ] || fail "SSE on a rejected channel returned $status, want 403"
 pass "sse rejected channel"
+
+# trusted_proxies covers only the container's own loopback. These requests
+# arrive through Docker's published ports, so their peer is the bridge address
+# and their X-Forwarded-For must be ignored: the /ip intercept renders the
+# client host the relay derived, which has to be the peer, not the forged
+# address. The trusted case is the protocol client below, which shares the
+# network namespace and therefore appears as 127.0.0.1.
+spoof="$base/ip/ip-spoof-$RANDOM"
+: >"$tmp/spoof"
+curl -sN --max-time 15 "$spoof" >"$tmp/spoof" 2>/dev/null &
+spoof_pid=$!
+found=0
+for _ in $(seq 1 25); do
+  status=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+    -H 'X-Forwarded-For: 203.0.113.9' --data-binary 'anything' "$spoof")
+  [ "$status" = 202 ] || fail "the /ip POST returned $status, want 202"
+  if grep -q '^data: ' "$tmp/spoof"; then
+    found=1
+    break
+  fi
+  sleep 0.2
+done
+kill "$spoof_pid" 2>/dev/null || true
+wait "$spoof_pid" 2>/dev/null || true
+[ "$found" = 1 ] || fail "the /ip stream never received the rendered client host: $(od -c "$tmp/spoof" | head -5)"
+if grep -q '203.0.113.9' "$tmp/spoof"; then
+  fail "an X-Forwarded-For from an untrusted peer was believed"
+fi
+grep -qE '^data: [0-9A-Fa-f:.]+$' "$tmp/spoof" ||
+  fail "/ip did not render a client host: $(od -c "$tmp/spoof" | head -5)"
+pass "trusted_proxies ignores an untrusted forwarded address"
 
 # WebSocket: a handshake from the same origin is upgraded, a foreign Origin is
 # refused. Frame exchange needs a real client and lives in pkg/ws.
@@ -292,7 +327,7 @@ timeout "$client_timeout" docker run --rm --network "container:$container" \
   -e "CADDY_RELAY_BROWSER=${CADDY_RELAY_BROWSER:-0}" \
   "$builder" sh -c "${client_prefix}go test -count=1 -timeout=${test_timeout} -run TestContainer ./test/client" ||
   fail "the protocol client checks failed"
-pass "websocket frames, load, and turn allocation"
+pass "websocket frames, load, client ip, and turn allocation"
 if [ "${CADDY_RELAY_BROWSER:-0}" = 1 ]; then
   pass "browser websocket and eventsource"
 fi
