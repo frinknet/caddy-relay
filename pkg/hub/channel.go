@@ -23,8 +23,9 @@ type participant struct {
 	queue chan []byte
 
 	// failed is set by the writer goroutine when send reports that the
-	// subscriber is gone. The actor reaps failed participants on its next
-	// publish, so the writer never has to touch actor state.
+	// subscriber is gone. It is only a hint for a publish racing the removal:
+	// the writer also asks the actor to drop the participant straight away,
+	// so a quiet channel does not keep a dead subscriber's slot.
 	failed atomic.Bool
 }
 
@@ -223,7 +224,7 @@ func (c *Channel) subscribe(send func([]byte) bool) (*Subscription, error) {
 func (c *Channel) writer(p *participant, replay [][]byte) {
 	for _, body := range replay {
 		if !p.send(body) {
-			p.failed.Store(true)
+			c.failParticipant(p)
 			return
 		}
 	}
@@ -234,12 +235,25 @@ func (c *Channel) writer(p *participant, replay [][]byte) {
 				return
 			}
 			if !p.send(body) {
-				p.failed.Store(true)
+				c.failParticipant(p)
 				return
 			}
 		case <-c.done:
 			return
 		}
+	}
+}
+
+// failParticipant marks p as gone and asks the actor to drop it immediately.
+// Without the removal a quiet channel would keep the dead subscriber, and its
+// global participant slot, until the next publish or the idle sweep. Removal
+// is idempotent, so it is safe against a concurrent Cancel and against the
+// fallback check in doPublish.
+func (c *Channel) failParticipant(p *participant) {
+	p.failed.Store(true)
+	select {
+	case c.inbox <- func() { c.removeParticipant(p.id) }:
+	case <-c.done:
 	}
 }
 

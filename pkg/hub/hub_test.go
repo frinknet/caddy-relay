@@ -651,6 +651,32 @@ func TestMaxParticipants(t *testing.T) {
 	second.Cancel()
 }
 
+func TestFailedSubscriberIsReapedWithoutNextPublish(t *testing.T) {
+	h := NewHub(ChannelsConfig{
+		MaxParticipants: 5,
+		Rules:           []*ChannelRule{{Pattern: "room-*", Messages: 5}},
+	})
+	ctx := context.Background()
+	// Retain a message so the subscriber's replay call fails as soon as the
+	// writer goroutine starts.
+	if res := h.Publish(ctx, []string{"room-1"}, []byte("retained"), 0); !res.OK() {
+		t.Fatalf("setup publish did not enqueue: %+v", res)
+	}
+	sub, err := h.Subscribe(ctx, "room-1", func([]byte) bool { return false })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Cancel()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for h.Participants() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("Participants() = %d, want the failed subscriber reaped with no further publish", h.Participants())
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestMaxParticipantsReleasedOnStop(t *testing.T) {
 	h := NewHub(ChannelsConfig{
 		MaxParticipants: 5,

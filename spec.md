@@ -228,8 +228,11 @@ inbox, which are executed by one `run` goroutine.
   `Cancel` enqueues `removeParticipant`.
 - `writer` is the only goroutine that calls `send` for a participant. It sends
   the replay first, then drains the queue until the queue closes, the channel
-  closes or `send` reports failure. Failure sets `failed`, which the actor
-  reaps on the next publish.
+  closes or `send` reports failure. Failure goes through `failParticipant`,
+  which sets `failed` and enqueues `removeParticipant`, so a dead subscriber
+  loses its slot at once instead of waiting for the next publish or the sweep.
+  `failed` remains as a hint for a publish racing that removal, and
+  `removeParticipant` is idempotent, so the two paths cannot double-close.
 - `removeParticipant` deletes the entry, releases the global slot, closes the
   queue so the writer exits, and records the idle timestamp when the channel
   becomes empty.
