@@ -31,11 +31,14 @@ func Serve(cfg Config, bus hub.Bus, w http.ResponseWriter, r *http.Request) {
 }
 
 func serveGet(cfg Config, bus hub.Bus, w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
+	// Caddy's response writers expose flushing through Unwrap/FlushError
+	// rather than http.Flusher, so probe the chain and flush through the
+	// ResponseController.
+	if !canFlush(w) {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
+	rc := http.NewResponseController(w)
 
 	// Reject before writing the stream's status line, so a refused channel
 	// does not look like a healthy 200 stream.
@@ -60,11 +63,13 @@ func serveGet(cfg Config, bus hub.Bus, w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	remoteIP := hub.ClientIP(r.RemoteAddr)
+
 	// Subscribe before opening the stream. The client's response only arrives
 	// once the subscription exists, so a publish that follows it cannot fall
 	// into the gap, and a subscription failure is a clean error status rather
 	// than an error frame after a 200.
-	sub, err := bus.Subscribe(ctx, channel, send)
+	sub, err := bus.Subscribe(ctx, channel, remoteIP, send)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
@@ -75,7 +80,7 @@ func serveGet(cfg Config, bus hub.Bus, w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
-	flusher.Flush() // the stream is live from here on
+	_ = rc.Flush() // the stream is live from here on
 
 	// keepalive
 	t := time.NewTicker(15 * time.Second)
@@ -88,10 +93,10 @@ func serveGet(cfg Config, bus hub.Bus, w http.ResponseWriter, r *http.Request) {
 			if _, err := fmt.Fprintf(w, "data: %s\n\n", body); err != nil {
 				return
 			}
-			flusher.Flush()
+			_ = rc.Flush()
 		case <-t.C:
 			fmt.Fprint(w, ": keepalive\n\n")
-			flusher.Flush()
+			_ = rc.Flush()
 		}
 	}
 }
@@ -114,7 +119,7 @@ func servePost(cfg Config, bus hub.Bus, w http.ResponseWriter, r *http.Request) 
 
 	info := hub.InterceptInfo{
 		Channel:  channel,
-		RemoteIP: r.RemoteAddr,
+		RemoteIP: hub.ClientIP(r.RemoteAddr),
 		Request:  r,
 	}
 	out, ok := bus.Intercept(r.Context(), cfg.Intercept, body, info)
@@ -124,6 +129,25 @@ func servePost(cfg Config, bus hub.Bus, w http.ResponseWriter, r *http.Request) 
 	}
 	bus.Publish(r.Context(), []string{cfg.Publish.Pattern}, out, 0)
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// canFlush reports whether w supports flushing, following Unwrap the same way
+// http.ResponseController does. It does not flush, so the status line and
+// headers are still free to change when the answer is no.
+func canFlush(w http.ResponseWriter) bool {
+	for {
+		if _, ok := w.(http.Flusher); ok {
+			return true
+		}
+		if _, ok := w.(interface{ FlushError() error }); ok {
+			return true
+		}
+		u, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return false
+		}
+		w = u.Unwrap()
+	}
 }
 
 func patternMatch(pattern, name string) bool {

@@ -6,9 +6,9 @@
 # ./build.sh and drives it the way a client would, so nothing here links the
 # plugin or runs Caddy in-process.
 #
-# It renders tests/e2e/Caddyfile into a temp directory, publishes the internal
-# ports to ephemeral host ports, waits for the image's own healthcheck, and then
-# checks:
+# It renders test/Caddyfile into a temp directory, publishes the internal
+# ports from a random block (host and container ports stay identical), waits
+# on the image's own healthcheck, and then checks:
 #
 #   - the image healthcheck (config loaded, admin endpoint up)
 #   - the HTTP and HTTPS sites
@@ -22,9 +22,9 @@
 # STUN attribute parsing) is covered by the package tests in pkg/.
 #
 # Usage:
-#   tests/e2e/run.sh
-#   CADDY_RELAY_IMAGE=caddy-relay:my-tag tests/e2e/run.sh
-#   KEEP=1 tests/e2e/run.sh     # leave the container running for inspection
+#   ./test/e2e.sh
+#   CADDY_RELAY_IMAGE=caddy-relay:my-tag ./test/e2e.sh
+#   KEEP=1 ./test/e2e.sh     # leave the container running for inspection
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -124,7 +124,7 @@ start_container() {
       -p "127.0.0.1:${stun_port}:${stun_port}/udp" \
       -p "127.0.0.1:${turn_port}:${turn_port}/udp" \
       -p "127.0.0.1:${turn_tls_port}:${turn_tls_port}/tcp" \
-      -v "$tmp/Caddyfile:/etc/caddy/Caddyfile:ro" \
+      -v "$tmp/Caddyfile:/srv/www/Caddyfile:ro" \
       -v "$tmp/turn.crt:/etc/caddy/turn.crt:ro" \
       -v "$tmp/turn.key:/etc/caddy/turn.key:ro" \
       "$image" 2>/dev/null); then

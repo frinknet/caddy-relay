@@ -63,14 +63,14 @@ func TestPatternMatching(t *testing.T) {
 	}})
 	ctx := context.Background()
 	for _, name := range []string{"room-1", "room-", "lobby"} {
-		sub, err := h.Subscribe(ctx, name, func([]byte) bool { return true })
+		sub, err := h.Subscribe(ctx, name, "", func([]byte) bool { return true })
 		if err != nil {
 			t.Fatalf("Subscribe(%q) = %v, want nil", name, err)
 		}
 		sub.Cancel()
 	}
 	for _, name := range []string{"rooms", "other-room", "room1", "lobby-1"} {
-		if _, err := h.Subscribe(ctx, name, func([]byte) bool { return true }); err == nil {
+		if _, err := h.Subscribe(ctx, name, "", func([]byte) bool { return true }); err == nil {
 			t.Errorf("Subscribe(%q) succeeded, want not-allowed error", name)
 		}
 	}
@@ -101,7 +101,7 @@ func TestReplayIsCappedByMessagesRule(t *testing.T) {
 		h.Publish(ctx, []string{"lobby"}, []byte(m), 0)
 	}
 	s := &sink{}
-	sub, err := h.Subscribe(ctx, "lobby", s.send)
+	sub, err := h.Subscribe(ctx, "lobby", "", s.send)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestReplayPrecedesLiveMessages(t *testing.T) {
 	h.Publish(ctx, []string{"lobby"}, []byte("b"), 0)
 
 	s := &sink{}
-	sub, err := h.Subscribe(ctx, "lobby", s.send)
+	sub, err := h.Subscribe(ctx, "lobby", "", s.send)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +150,7 @@ func TestOversizeMessageIsDropped(t *testing.T) {
 	h.Publish(ctx, []string{"lobby"}, []byte("12345"), 0)
 
 	s := &sink{}
-	sub, err := h.Subscribe(ctx, "lobby", s.send)
+	sub, err := h.Subscribe(ctx, "lobby", "", s.send)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,12 +168,12 @@ func TestSenderIsExcluded(t *testing.T) {
 	h := NewHub(ChannelsConfig{Rules: []*ChannelRule{{Pattern: "lobby", Messages: 10}}})
 	ctx := context.Background()
 	sa, sb := &sink{}, &sink{}
-	subA, err := h.Subscribe(ctx, "lobby", sa.send)
+	subA, err := h.Subscribe(ctx, "lobby", "", sa.send)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer subA.Cancel()
-	subB, err := h.Subscribe(ctx, "lobby", sb.send)
+	subB, err := h.Subscribe(ctx, "lobby", "", sb.send)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,12 +192,12 @@ func TestSenderIsExcluded(t *testing.T) {
 func TestParticipantsCap(t *testing.T) {
 	h := NewHub(ChannelsConfig{Rules: []*ChannelRule{{Pattern: "lobby", Participants: 1}}})
 	ctx := context.Background()
-	sub, err := h.Subscribe(ctx, "lobby", func([]byte) bool { return true })
+	sub, err := h.Subscribe(ctx, "lobby", "", func([]byte) bool { return true })
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer sub.Cancel()
-	if _, err := h.Subscribe(ctx, "lobby", func([]byte) bool { return true }); err == nil {
+	if _, err := h.Subscribe(ctx, "lobby", "", func([]byte) bool { return true }); err == nil {
 		t.Fatal("second subscriber accepted, want participants cap error")
 	}
 }
@@ -208,12 +208,12 @@ func TestMaxChannels(t *testing.T) {
 		Rules:       []*ChannelRule{{Pattern: "room-*"}},
 	})
 	ctx := context.Background()
-	sub, err := h.Subscribe(ctx, "room-1", func([]byte) bool { return true })
+	sub, err := h.Subscribe(ctx, "room-1", "", func([]byte) bool { return true })
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer sub.Cancel()
-	if _, err := h.Subscribe(ctx, "room-2", func([]byte) bool { return true }); err == nil {
+	if _, err := h.Subscribe(ctx, "room-2", "", func([]byte) bool { return true }); err == nil {
 		t.Fatal("second channel created, want max_channels error")
 	}
 }
@@ -228,7 +228,7 @@ func TestStalledSubscriberDoesNotBlockPublish(t *testing.T) {
 
 	release := make(chan struct{})
 	blocked := make(chan struct{}, 1)
-	sub, err := h.Subscribe(ctx, "lobby", func([]byte) bool {
+	sub, err := h.Subscribe(ctx, "lobby", "", func([]byte) bool {
 		select {
 		case blocked <- struct{}{}:
 		default:
@@ -313,7 +313,7 @@ func TestPublishResultCountsSlowSubscriberDrops(t *testing.T) {
 
 	release := make(chan struct{})
 	blocked := make(chan struct{}, 1)
-	sub, err := h.Subscribe(ctx, "lobby", func([]byte) bool {
+	sub, err := h.Subscribe(ctx, "lobby", "", func([]byte) bool {
 		select {
 		case blocked <- struct{}{}:
 		default:
@@ -357,7 +357,7 @@ func TestIdleChannelIsSweptAndRecreated(t *testing.T) {
 	h.Start()
 	defer h.Stop()
 
-	sub, err := h.Subscribe(ctx, "lobby", func([]byte) bool { return true })
+	sub, err := h.Subscribe(ctx, "lobby", "", func([]byte) bool { return true })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +379,7 @@ func TestIdleChannelIsSweptAndRecreated(t *testing.T) {
 
 	// The name must be usable again: a swept channel cannot be left behind.
 	s := &sink{}
-	sub2, err := h.Subscribe(ctx, "lobby", s.send)
+	sub2, err := h.Subscribe(ctx, "lobby", "", s.send)
 	if err != nil {
 		t.Fatalf("Subscribe after sweep: %v", err)
 	}
@@ -394,7 +394,7 @@ func TestStopClosesChannels(t *testing.T) {
 	h := NewHub(ChannelsConfig{Rules: []*ChannelRule{{Pattern: "lobby"}}})
 	ctx := context.Background()
 	s := &sink{}
-	sub, err := h.Subscribe(ctx, "lobby", s.send)
+	sub, err := h.Subscribe(ctx, "lobby", "", s.send)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,7 +437,7 @@ func TestMaxMemory(t *testing.T) {
 
 	t.Run("refused when every channel has participants", func(t *testing.T) {
 		h := NewHub(ChannelsConfig{Rules: []*ChannelRule{rule()}, MaxMemory: 100})
-		sub, err := h.Subscribe(ctx, "room-1", func([]byte) bool { return true })
+		sub, err := h.Subscribe(ctx, "room-1", "", func([]byte) bool { return true })
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -494,7 +494,7 @@ func TestMaxMemory(t *testing.T) {
 			Rules:     []*ChannelRule{{Pattern: "room-1", Messages: 1000, IdleTTL: time.Minute}},
 			MaxMemory: maxMemory,
 		})
-		sub, err := h.Subscribe(ctx, "room-1", func([]byte) bool { return true })
+		sub, err := h.Subscribe(ctx, "room-1", "", func([]byte) bool { return true })
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -593,7 +593,7 @@ func TestSlowSubscriberDropIsReported(t *testing.T) {
 
 	release := make(chan struct{})
 	blocked := make(chan struct{}, 1)
-	sub, err := h.Subscribe(ctx, "lobby", func([]byte) bool {
+	sub, err := h.Subscribe(ctx, "lobby", "", func([]byte) bool {
 		select {
 		case blocked <- struct{}{}:
 		default:
@@ -624,7 +624,7 @@ func TestMaxParticipants(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	first, err := h.Subscribe(ctx, "room-1", func([]byte) bool { return true })
+	first, err := h.Subscribe(ctx, "room-1", "", func([]byte) bool { return true })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -632,7 +632,7 @@ func TestMaxParticipants(t *testing.T) {
 		t.Fatalf("Participants() = %d, want 1", got)
 	}
 	// The cap is global: a different channel must not hand out a second slot.
-	if _, err := h.Subscribe(ctx, "room-2", func([]byte) bool { return true }); err == nil {
+	if _, err := h.Subscribe(ctx, "room-2", "", func([]byte) bool { return true }); err == nil {
 		t.Error("a second subscriber was accepted past max_participants")
 	}
 
@@ -644,7 +644,7 @@ func TestMaxParticipants(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	second, err := h.Subscribe(ctx, "room-2", func([]byte) bool { return true })
+	second, err := h.Subscribe(ctx, "room-2", "", func([]byte) bool { return true })
 	if err != nil {
 		t.Fatalf("slot was not released: %v", err)
 	}
@@ -662,7 +662,7 @@ func TestFailedSubscriberIsReapedWithoutNextPublish(t *testing.T) {
 	if res := h.Publish(ctx, []string{"room-1"}, []byte("retained"), 0); !res.OK() {
 		t.Fatalf("setup publish did not enqueue: %+v", res)
 	}
-	sub, err := h.Subscribe(ctx, "room-1", func([]byte) bool { return false })
+	sub, err := h.Subscribe(ctx, "room-1", "", func([]byte) bool { return false })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -682,7 +682,7 @@ func TestMaxParticipantsReleasedOnStop(t *testing.T) {
 		MaxParticipants: 5,
 		Rules:           []*ChannelRule{{Pattern: "room-*"}},
 	})
-	sub, err := h.Subscribe(context.Background(), "room-1", func([]byte) bool { return true })
+	sub, err := h.Subscribe(context.Background(), "room-1", "", func([]byte) bool { return true })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -692,4 +692,109 @@ func TestMaxParticipantsReleasedOnStop(t *testing.T) {
 		t.Errorf("Participants() = %d after Stop, want 0", got)
 	}
 	sub.Cancel()
+}
+
+func TestMaxParticipantsPerIP(t *testing.T) {
+	h := NewHub(ChannelsConfig{
+		MaxParticipantsPerIP: 1,
+		Rules:                []*ChannelRule{{Pattern: "room-*"}},
+	})
+	ctx := context.Background()
+	ok := func([]byte) bool { return true }
+
+	first, err := h.Subscribe(ctx, "room-1", "10.0.0.1", ok)
+	if err != nil {
+		t.Fatalf("first subscription from 10.0.0.1: %v", err)
+	}
+	if _, err := h.Subscribe(ctx, "room-2", "10.0.0.1", ok); err != errMaxParticipantsPerIP {
+		t.Fatalf("second subscription from 10.0.0.1 = %v, want errMaxParticipantsPerIP", err)
+	}
+	// A different address is unaffected, and so is a subscriber whose address
+	// is unknown (transports pass "" when the host cannot be parsed).
+	other, err := h.Subscribe(ctx, "room-1", "10.0.0.2", ok)
+	if err != nil {
+		t.Fatalf("subscription from a different IP: %v", err)
+	}
+	defer other.Cancel()
+	unknown, err := h.Subscribe(ctx, "room-1", "", ok)
+	if err != nil {
+		t.Fatalf("subscription from an unknown IP: %v", err)
+	}
+	defer unknown.Cancel()
+
+	// Cancelling gives the address its slot back.
+	first.Cancel()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		again, err := h.Subscribe(ctx, "room-1", "10.0.0.1", ok)
+		if err == nil {
+			again.Cancel()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("slot not released after Cancel: %v", err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// A per-IP refusal must return only the global slot it claimed, so the
+// address that is already subscribed keeps its place.
+func TestMaxParticipantsPerIPKeepsGlobalCountExact(t *testing.T) {
+	h := NewHub(ChannelsConfig{
+		MaxParticipants:      2,
+		MaxParticipantsPerIP: 1,
+		Rules:                []*ChannelRule{{Pattern: "room-*"}},
+	})
+	ctx := context.Background()
+	ok := func([]byte) bool { return true }
+
+	first, err := h.Subscribe(ctx, "room-1", "10.0.0.1", ok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Cancel()
+	if _, err := h.Subscribe(ctx, "room-2", "10.0.0.1", ok); err != errMaxParticipantsPerIP {
+		t.Fatalf("second subscription from one IP = %v, want errMaxParticipantsPerIP", err)
+	}
+	if got := h.Participants(); got != 1 {
+		t.Fatalf("Participants() = %d after a per-IP refusal, want 1", got)
+	}
+	if _, err := h.Subscribe(ctx, "room-3", "10.0.0.2", ok); err != nil {
+		t.Fatalf("global cap was consumed by the refused subscription: %v", err)
+	}
+}
+
+func TestMaxParticipantsPerIPReleasedOnStop(t *testing.T) {
+	h := NewHub(ChannelsConfig{
+		MaxParticipantsPerIP: 1,
+		Rules:                []*ChannelRule{{Pattern: "room-*"}},
+	})
+	sub, err := h.Subscribe(context.Background(), "room-1", "10.0.0.1", func([]byte) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Start()
+	h.Stop()
+	sub.Cancel()
+	h.mu.Lock()
+	left := len(h.byIP)
+	h.mu.Unlock()
+	if left != 0 {
+		t.Errorf("byIP has %d entries after Stop, want 0", left)
+	}
+}
+
+func TestClientIP(t *testing.T) {
+	cases := map[string]string{
+		"192.0.2.7:54321":   "192.0.2.7",
+		"[2001:db8::1]:443": "2001:db8::1",
+		"192.0.2.7":         "192.0.2.7",
+		"":                  "",
+	}
+	for in, want := range cases {
+		if got := ClientIP(in); got != want {
+			t.Errorf("ClientIP(%q) = %q, want %q", in, got, want)
+		}
+	}
 }

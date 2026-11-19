@@ -24,8 +24,11 @@ type ChannelsConfig struct {
 	Rules       []*ChannelRule `json:"rules,omitempty"`
 	MaxChannels int            `json:"max_channels,omitempty"`
 	// MaxParticipants caps subscribers across all channels; 0 = unlimited.
-	MaxParticipants int   `json:"max_participants,omitempty"`
-	MaxMemory       int64 `json:"max_memory,omitempty"` // bytes; 0 = unlimited
+	MaxParticipants int `json:"max_participants,omitempty"`
+	// MaxParticipantsPerIP caps simultaneous subscribers from one client
+	// address; 0 = unlimited. Transports pass the client host on subscribe.
+	MaxParticipantsPerIP int   `json:"max_participants_per_ip,omitempty"`
+	MaxMemory            int64 `json:"max_memory,omitempty"` // bytes; 0 = unlimited
 }
 
 // SubscribeSpec is the parsed `subscribe <pattern>` sub-directive.

@@ -27,7 +27,7 @@ type Config struct {
 
 // Serve handles an HTTP request for the relay_ws directive.
 func Serve(cfg Config, bus hub.Bus, w http.ResponseWriter, r *http.Request) {
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+	conn, err := websocket.Accept(upgradeWriter(w), r, &websocket.AcceptOptions{
 		OriginPatterns: cfg.OriginPatterns,
 	})
 	if err != nil {
@@ -57,7 +57,8 @@ func Serve(cfg Config, bus hub.Bus, w http.ResponseWriter, r *http.Request) {
 		return conn.Write(wctx, websocket.MessageText, body) == nil
 	}
 
-	sub, err := bus.Subscribe(ctx, channel, send)
+	remoteIP := hub.ClientIP(r.RemoteAddr)
+	sub, err := bus.Subscribe(ctx, channel, remoteIP, send)
 	if err != nil {
 		conn.Close(websocket.StatusInternalError, err.Error())
 		return
@@ -89,7 +90,7 @@ func Serve(cfg Config, bus hub.Bus, w http.ResponseWriter, r *http.Request) {
 
 		info := hub.InterceptInfo{
 			Channel:  channel,
-			RemoteIP: r.RemoteAddr,
+			RemoteIP: remoteIP,
 			Request:  r,
 		}
 		out, ok := bus.Intercept(ctx, cfg.Intercept, body, info)
@@ -111,6 +112,22 @@ func rateLimit(bus hub.Bus, channel string) time.Duration {
 		return rule.RateLimit
 	}
 	return time.Second
+}
+
+// upgradeWriter returns the first writer in the Unwrap chain that supports
+// http.Hijacker. coder/websocket asserts http.Hijacker directly, while Caddy's
+// response writers expose hijacking only through Unwrap.
+func upgradeWriter(w http.ResponseWriter) http.ResponseWriter {
+	for {
+		if _, ok := w.(http.Hijacker); ok {
+			return w
+		}
+		u, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return w
+		}
+		w = u.Unwrap()
+	}
 }
 
 func patternMatch(pattern, name string) bool {

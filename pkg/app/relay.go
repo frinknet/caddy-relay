@@ -125,6 +125,30 @@ func parseRelayBlock(d *caddyfile.Dispenser, cfg *Relay) error {
 				return d.ArgErr()
 			}
 			cfg.TurnBind = d.Val()
+		case "turn_max_allocations":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			n, err := atoi(d.Val())
+			if err != nil {
+				return d.Errf("turn_max_allocations: %v", err)
+			}
+			if n < 0 {
+				return d.Errf("turn_max_allocations: must not be negative")
+			}
+			cfg.TurnMaxAllocations = n
+		case "turn_auth_rate":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			n, err := atoi(d.Val())
+			if err != nil {
+				return d.Errf("turn_auth_rate: %v", err)
+			}
+			if n < 0 {
+				return d.Errf("turn_auth_rate: must not be negative")
+			}
+			cfg.TurnAuthRate = n
 		case "channels":
 			if err := parseChannelsBlock(d, &cfg.Channels); err != nil {
 				return err
@@ -166,6 +190,18 @@ func parseChannelsBlock(d *caddyfile.Dispenser, cfg *hub.ChannelsConfig) error {
 				return d.Errf("max_participants: %v", err)
 			}
 			cfg.MaxParticipants = n
+		case "max_participants_per_ip":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			n, err := atoi(d.Val())
+			if err != nil {
+				return d.Errf("max_participants_per_ip: %v", err)
+			}
+			if n < 0 {
+				return d.Errf("max_participants_per_ip: must not be negative")
+			}
+			cfg.MaxParticipantsPerIP = n
 		default:
 			// channel pattern
 			rule := &hub.ChannelRule{Pattern: d.Val()}
@@ -255,17 +291,22 @@ const turnRealm = "caddy-relay"
 // Its exported fields are its JSON configuration; the unexported fields are
 // runtime state and are never serialised.
 type Relay struct {
-	StunAddr       string             `json:"stun,omitempty"`
-	TurnAddr       string             `json:"turn,omitempty"`
-	TurnSecret     string             `json:"turn_secret,omitempty"`
-	TurnTLSAddr    string             `json:"turn_tls,omitempty"`
-	TurnTLSCert    string             `json:"turn_tls_cert,omitempty"`
-	TurnTLSKey     string             `json:"turn_tls_key,omitempty"`
-	TurnRelayMin   int                `json:"turn_relay_min,omitempty"`
-	TurnRelayMax   int                `json:"turn_relay_max,omitempty"`
-	TurnExternalIP string             `json:"turn_external_ip,omitempty"`
-	TurnBind       string             `json:"turn_bind,omitempty"`
-	Channels       hub.ChannelsConfig `json:"channels,omitempty"`
+	StunAddr       string `json:"stun,omitempty"`
+	TurnAddr       string `json:"turn,omitempty"`
+	TurnSecret     string `json:"turn_secret,omitempty"`
+	TurnTLSAddr    string `json:"turn_tls,omitempty"`
+	TurnTLSCert    string `json:"turn_tls_cert,omitempty"`
+	TurnTLSKey     string `json:"turn_tls_key,omitempty"`
+	TurnRelayMin   int    `json:"turn_relay_min,omitempty"`
+	TurnRelayMax   int    `json:"turn_relay_max,omitempty"`
+	TurnExternalIP string `json:"turn_external_ip,omitempty"`
+	TurnBind       string `json:"turn_bind,omitempty"`
+	// TurnMaxAllocations caps concurrent TURN relays; 0 = unlimited.
+	TurnMaxAllocations int `json:"turn_max_allocations,omitempty"`
+	// TurnAuthRate caps authenticated TURN requests per second per client IP;
+	// 0 = unlimited.
+	TurnAuthRate int                `json:"turn_auth_rate,omitempty"`
+	Channels     hub.ChannelsConfig `json:"channels,omitempty"`
 
 	hub     *hub.Hub
 	stun    io.Closer
@@ -322,6 +363,9 @@ func (r *Relay) turnConfig(addr string) turn.Config {
 		AuthSecret:   r.TurnSecret,
 		TLSCertFile:  r.TurnTLSCert,
 		TLSKeyFile:   r.TurnTLSKey,
+
+		MaxAllocations: r.TurnMaxAllocations,
+		AuthRatePerIP:  r.TurnAuthRate,
 	}
 }
 
@@ -382,8 +426,8 @@ func hubFor(ctx caddy.Context) (*Relay, error) {
 // Bus implementation (what transports see)
 // ============================================================
 
-func (r *Relay) Subscribe(ctx context.Context, channel string, send func([]byte) bool) (*hub.Subscription, error) {
-	return r.hub.Subscribe(ctx, channel, send)
+func (r *Relay) Subscribe(ctx context.Context, channel, remoteIP string, send func([]byte) bool) (*hub.Subscription, error) {
+	return r.hub.Subscribe(ctx, channel, remoteIP, send)
 }
 
 func (r *Relay) Publish(ctx context.Context, patterns []string, body []byte, exclude hub.SubID) hub.Result {

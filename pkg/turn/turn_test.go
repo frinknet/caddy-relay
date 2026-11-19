@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -247,8 +248,8 @@ func selfSignedCert(t *testing.T) (certPath, keyPath string) {
 	return certPath, keyPath
 }
 
-// The TLS listener must come up with the configured certificate; the TURN
-// protocol over TLS itself is not exercised here (see BACKLOG.md).
+// The TLS listener must come up with the configured certificate; no TURN
+// allocation is made through it here.
 func TestListenTLSServesTheCertificate(t *testing.T) {
 	certPath, keyPath := selfSignedCert(t)
 	port := freeUDPPort(t)
@@ -287,3 +288,178 @@ func TestListenTLSRejectsMissingKeyPair(t *testing.T) {
 		t.Fatal("ListenTLS accepted a certificate with no key")
 	}
 }
+
+// openAllocation starts a client and keeps its relay open until the test ends,
+// so the allocation stays live while other attempts run.
+func openAllocation(t *testing.T, addr, username, password, realm string) error {
+	t.Helper()
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := turn.NewClient(&turn.ClientConfig{
+		STUNServerAddr: addr,
+		TURNServerAddr: addr,
+		Conn:           conn,
+		Username:       username,
+		Password:       password,
+		Realm:          realm,
+	})
+	if err != nil {
+		conn.Close()
+		t.Fatalf("NewClient: %v", err)
+	}
+	if err := client.Listen(); err != nil {
+		client.Close()
+		conn.Close()
+		t.Fatalf("Listen: %v", err)
+	}
+	relay, err := client.Allocate()
+	if err != nil {
+		client.Close()
+		conn.Close()
+		return err
+	}
+	t.Cleanup(func() {
+		relay.Close()
+		client.Close()
+		conn.Close()
+	})
+	return nil
+}
+
+func TestMaxAllocationsIsEnforced(t *testing.T) {
+	const secret = "test-shared-secret"
+	const realm = "test-realm"
+	addr := startTURN(t, Config{
+		ListenAddr:     fmt.Sprintf("udp/127.0.0.1:%d", freeUDPPort(t)),
+		ExternalIP:     "127.0.0.1",
+		Realm:          realm,
+		AuthSecret:     secret,
+		MaxAllocations: 1,
+	})
+
+	alice, alicePass, err := turn.GenerateLongTermTURNRESTCredentials(secret, "alice", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, bobPass, err := turn.GenerateLongTermTURNRESTCredentials(secret, "bob", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := openAllocation(t, addr, alice, alicePass, realm); err != nil {
+		t.Fatalf("first allocation failed: %v", err)
+	}
+	if err := openAllocation(t, addr, bob, bobPass, realm); err == nil {
+		t.Fatal("second allocation succeeded with MaxAllocations 1")
+	}
+}
+
+// The generator releases a slot when pion closes the relay, so a freed
+// allocation does not consume the cap.
+func TestCappedGeneratorReleasesSlotOnClose(t *testing.T) {
+	gen := newRelayGenerator(Config{MaxAllocations: 1, BindAddr: "127.0.0.1"}, net.ParseIP("127.0.0.1"))
+	capped, ok := gen.(*cappedGenerator)
+	if !ok {
+		t.Fatalf("generator is %T, want *cappedGenerator", gen)
+	}
+	// pion calls Validate before serving; it installs the net used to bind.
+	if err := capped.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	conn, _, err := capped.AllocatePacketConn("udp4", 0)
+	if err != nil {
+		t.Fatalf("first allocation: %v", err)
+	}
+	if capped.Live() != 1 {
+		t.Errorf("Live() = %d, want 1", capped.Live())
+	}
+	if _, _, err := capped.AllocatePacketConn("udp4", 0); !errors.Is(err, errAllocationCap) {
+		t.Errorf("second allocation error = %v, want errAllocationCap", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if capped.Live() != 0 {
+		t.Errorf("Live() = %d after Close, want 0", capped.Live())
+	}
+	again, _, err := capped.AllocatePacketConn("udp4", 0)
+	if err != nil {
+		t.Fatalf("allocation after Close: %v", err)
+	}
+	again.Close()
+}
+
+func TestAuthRatePerIP(t *testing.T) {
+	limiters := newIPLimiters(2)
+	addr := &net.UDPAddr{IP: net.IPv4(198, 51, 100, 7), Port: 40000}
+	if !limiters.allow(hostOf(addr)) || !limiters.allow(hostOf(addr)) {
+		t.Fatal("the configured burst was refused")
+	}
+	if limiters.allow(hostOf(addr)) {
+		t.Fatal("a third attempt passed a limiter of 2 per second")
+	}
+	// The port is not part of the key: another connection from the same host
+	// shares the limiter.
+	other := &net.UDPAddr{IP: net.IPv4(198, 51, 100, 7), Port: 40001}
+	if limiters.allow(hostOf(other)) {
+		t.Fatal("a different port from the same IP was not limited")
+	}
+	elsewhere := &net.UDPAddr{IP: net.IPv4(198, 51, 100, 8), Port: 40000}
+	if !limiters.allow(hostOf(elsewhere)) {
+		t.Fatal("a different IP was limited")
+	}
+}
+
+func TestAuthRateAllowsNormalAllocation(t *testing.T) {
+	const secret = "test-shared-secret"
+	const realm = "test-realm"
+	addr := startTURN(t, Config{
+		ListenAddr:    fmt.Sprintf("udp/127.0.0.1:%d", freeUDPPort(t)),
+		ExternalIP:    "127.0.0.1",
+		Realm:         realm,
+		AuthSecret:    secret,
+		AuthRatePerIP: 100,
+	})
+	username, password, err := turn.GenerateLongTermTURNRESTCredentials(secret, "alice", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayAddr, err := allocate(t, addr, username, password, realm)
+	if err != nil {
+		t.Fatalf("allocation with AuthRatePerIP set failed: %v", err)
+	}
+	if relayAddr == nil {
+		t.Fatal("allocation returned no relay address")
+	}
+}
+
+func TestHostOf(t *testing.T) {
+	cases := map[string]string{
+		"192.0.2.7:54321":   "192.0.2.7",
+		"[2001:db8::1]:443": "2001:db8::1",
+	}
+	for in, want := range cases {
+		addr, err := net.ResolveUDPAddr("udp", in)
+		if err != nil {
+			t.Fatalf("ResolveUDPAddr(%q): %v", in, err)
+		}
+		if got := hostOf(addr); got != want {
+			t.Errorf("hostOf(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// An address that carries no port is used as it is.
+	if got := hostOf(addrString("192.0.2.7")); got != "192.0.2.7" {
+		t.Errorf("hostOf(portless) = %q, want 192.0.2.7", got)
+	}
+	if got := hostOf(nil); got != "" {
+		t.Errorf("hostOf(nil) = %q, want empty", got)
+	}
+}
+
+// addrString is a net.Addr that returns its value verbatim, used to cover
+// addresses without a port.
+type addrString string
+
+func (a addrString) Network() string { return "udp" }
+func (a addrString) String() string  { return string(a) }

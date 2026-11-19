@@ -15,6 +15,8 @@
 		# turn_secret change-me-to-a-long-random-string
 		# turn_external_ip 203.0.113.1
 		# turn_relay_ports 49152-65535
+		# turn_max_allocations 1024
+		# turn_auth_rate 50
 		# turn_tls :5349
 		# turn_tls_cert /etc/caddy/turn.crt
 		# turn_tls_key /etc/caddy/turn.key
@@ -22,6 +24,7 @@
 		channels {
 			max_channels 2000
 			max_participants 10000
+			max_participants_per_ip 50
 			max_memory 256M
 
 			# Pattern-based channel rules

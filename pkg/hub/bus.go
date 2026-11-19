@@ -6,13 +6,15 @@ import "context"
 // It is implemented by the root relay package, not by Hub itself — so the
 // transports never import the Caddy layer.
 type Bus interface {
-	// Subscribe joins a channel. send is called, from a goroutine owned by
-	// the hub, for each message the subscriber should receive: retained
-	// messages first, then live ones, in order. Returning false from send
-	// drops the subscriber. send may block without stalling the channel;
-	// a subscriber that falls behind has its newest messages dropped.
-	// The returned Subscription carries a stable ID and a Cancel func.
-	Subscribe(ctx context.Context, channel string, send func([]byte) bool) (*Subscription, error)
+	// Subscribe joins a channel. remoteIP is the client host (empty when
+	// unknown) and is what max_participants_per_ip counts against. send is
+	// called, from a goroutine owned by the hub, for each message the
+	// subscriber should receive: retained messages first, then live ones, in
+	// order. Returning false from send drops the subscriber. send may block
+	// without stalling the channel; a subscriber that falls behind has its
+	// newest messages dropped. The returned Subscription carries a stable ID
+	// and a Cancel func.
+	Subscribe(ctx context.Context, channel, remoteIP string, send func([]byte) bool) (*Subscription, error)
 
 	// Publish fans out body to every existing channel matching any pattern.
 	// Concrete names create channels on demand. exclude is the subscriber

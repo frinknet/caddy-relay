@@ -16,6 +16,7 @@ import (
 // fakeBus stands in for the hub so the transport can be tested on its own.
 type fakeBus struct {
 	mu          sync.Mutex
+	ip          string
 	send        func([]byte) bool
 	onSubscribe func(send func([]byte) bool)
 	published   [][]byte
@@ -23,8 +24,9 @@ type fakeBus struct {
 
 func (b *fakeBus) Rule(string) *hub.ChannelRule { return nil }
 
-func (b *fakeBus) Subscribe(_ context.Context, _ string, send func([]byte) bool) (*hub.Subscription, error) {
+func (b *fakeBus) Subscribe(_ context.Context, _, remoteIP string, send func([]byte) bool) (*hub.Subscription, error) {
 	b.mu.Lock()
+	b.ip = remoteIP
 	b.send = send
 	onSub := b.onSubscribe
 	b.mu.Unlock()
@@ -43,6 +45,13 @@ func (b *fakeBus) Publish(_ context.Context, patterns []string, body []byte, _ h
 
 func (b *fakeBus) Intercept(_ context.Context, _ *hub.InterceptSpec, body []byte, _ hub.InterceptInfo) ([]byte, bool) {
 	return body, true
+}
+
+// subscribeIP returns the client host the transport passed to Subscribe.
+func (b *fakeBus) subscribeIP() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.ip
 }
 
 func (b *fakeBus) subscriber(t *testing.T) func([]byte) bool {
@@ -116,11 +125,45 @@ func TestGetStreamsRetainedThenLive(t *testing.T) {
 	}
 
 	send := bus.subscriber(t)
+	// The subscription carries the client host, without its ephemeral port,
+	// which is what max_participants_per_ip counts.
+	if got := bus.subscribeIP(); got != "127.0.0.1" {
+		t.Errorf("Subscribe remote IP = %q, want 127.0.0.1", got)
+	}
 	if !send([]byte("live")) {
 		t.Fatal("send reported failure")
 	}
 	if got := nextData(t, br); got != "live" {
 		t.Errorf("second frame = %q, want live", got)
+	}
+}
+
+// hideFlusher exposes Unwrap but not http.Flusher, the way Caddy's response
+// writers do. The handler has to reach the flush through the unwrap chain.
+type hideFlusher struct {
+	http.ResponseWriter
+}
+
+func (w hideFlusher) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func TestGetStreamsThroughWriterWrapper(t *testing.T) {
+	bus := &fakeBus{}
+	bus.onSubscribe = func(send func([]byte) bool) { send([]byte("retained")) }
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		Serve(Config{Subscribe: &hub.SubscribeSpec{Pattern: "room-*"}}, bus, hideFlusher{w}, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL + "/room-1")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: a writer that hides http.Flusher must still stream", resp.StatusCode)
+	}
+	if got := nextData(t, bufio.NewReader(resp.Body)); got != "retained" {
+		t.Errorf("first frame = %q, want retained", got)
 	}
 }
 

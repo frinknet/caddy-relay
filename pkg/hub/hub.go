@@ -31,8 +31,10 @@ type Hub struct {
 	stopped  atomic.Bool
 
 	// participants counts subscribers across all channels. It is only
-	// maintained when MaxParticipants is set.
+	// maintained when MaxParticipants is set. byIP holds the same count per
+	// client host for MaxParticipantsPerIP, under mu.
 	participants atomic.Int64
+	byIP         map[string]int64
 }
 
 // Logger receives hub events an operator should see, such as a subscriber
@@ -56,6 +58,7 @@ func NewHub(cfg ChannelsConfig) *Hub {
 	return &Hub{
 		channels: make(map[string]*Channel),
 		cfg:      cfg,
+		byIP:     make(map[string]int64),
 	}
 }
 
@@ -84,30 +87,59 @@ func (h *Hub) Stop() {
 	}
 	h.retained.Store(0)
 	h.participants.Store(0)
+	h.mu.Lock()
+	h.byIP = make(map[string]int64)
+	h.mu.Unlock()
 }
 
-// acquireParticipant reserves a subscriber slot, reporting false when the
-// global participant cap is already reached.
-func (h *Hub) acquireParticipant() bool {
-	if h.cfg.MaxParticipants <= 0 {
-		return true
-	}
-	for {
-		cur := h.participants.Load()
-		if cur >= int64(h.cfg.MaxParticipants) {
-			return false
+// acquireParticipant reserves a subscriber slot for a client at remoteIP,
+// reporting the cap that refused it, if any.
+func (h *Hub) acquireParticipant(remoteIP string) error {
+	if h.cfg.MaxParticipants > 0 {
+		for {
+			cur := h.participants.Load()
+			if cur >= int64(h.cfg.MaxParticipants) {
+				return errMaxParticipantsCap
+			}
+			if h.participants.CompareAndSwap(cur, cur+1) {
+				break
+			}
 		}
-		if h.participants.CompareAndSwap(cur, cur+1) {
-			return true
-		}
 	}
+	if h.cfg.MaxParticipantsPerIP <= 0 || remoteIP == "" {
+		return nil
+	}
+	h.mu.Lock()
+	if h.byIP[remoteIP] >= int64(h.cfg.MaxParticipantsPerIP) {
+		h.mu.Unlock()
+		// Give back only the global slot claimed above: this address's count
+		// was not incremented, so decrementing it would free an existing
+		// subscriber's place.
+		if h.cfg.MaxParticipants > 0 {
+			h.participants.Add(-1)
+		}
+		return errMaxParticipantsPerIP
+	}
+	h.byIP[remoteIP]++
+	h.mu.Unlock()
+	return nil
 }
 
 // releaseParticipant gives a subscriber slot back.
-func (h *Hub) releaseParticipant() {
+func (h *Hub) releaseParticipant(remoteIP string) {
 	if h.cfg.MaxParticipants > 0 {
 		h.participants.Add(-1)
 	}
+	if h.cfg.MaxParticipantsPerIP <= 0 || remoteIP == "" {
+		return
+	}
+	h.mu.Lock()
+	if n := h.byIP[remoteIP] - 1; n > 0 {
+		h.byIP[remoteIP] = n
+	} else {
+		delete(h.byIP, remoteIP)
+	}
+	h.mu.Unlock()
 }
 
 // Participants reports the current subscriber count across all channels. It
@@ -246,13 +278,15 @@ func (h *Hub) existingChannels(pattern string) []*Channel {
 	return out
 }
 
-// Subscribe joins name.
-func (h *Hub) Subscribe(ctx context.Context, name string, send func([]byte) bool) (*Subscription, error) {
+// Subscribe joins name on behalf of a client at remoteIP, which is the host
+// part of the client address (empty when unknown). The IP only matters for
+// max_participants_per_ip.
+func (h *Hub) Subscribe(ctx context.Context, name, remoteIP string, send func([]byte) bool) (*Subscription, error) {
 	ch, err := h.getOrCreate(name)
 	if err != nil {
 		return nil, err
 	}
-	return ch.subscribe(send)
+	return ch.subscribe(remoteIP, send)
 }
 
 // Publish fans out body to every existing channel matching any pattern.

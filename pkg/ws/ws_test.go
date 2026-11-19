@@ -17,6 +17,7 @@ import (
 // fakeBus stands in for the hub so the transport can be tested on its own.
 type fakeBus struct {
 	mu        sync.Mutex
+	ip        string
 	send      func([]byte) bool
 	published [][]byte
 	intercept func([]byte) ([]byte, bool)
@@ -25,8 +26,9 @@ type fakeBus struct {
 
 func (b *fakeBus) Rule(string) *hub.ChannelRule { return b.rule }
 
-func (b *fakeBus) Subscribe(_ context.Context, _ string, send func([]byte) bool) (*hub.Subscription, error) {
+func (b *fakeBus) Subscribe(_ context.Context, _, remoteIP string, send func([]byte) bool) (*hub.Subscription, error) {
 	b.mu.Lock()
+	b.ip = remoteIP
 	b.send = send
 	b.mu.Unlock()
 	return &hub.Subscription{ID: 1, Cancel: func() {}}, nil
@@ -47,6 +49,13 @@ func (b *fakeBus) Intercept(_ context.Context, _ *hub.InterceptSpec, body []byte
 }
 
 // subscriber waits for the handler to register its send func.
+// subscribeIP returns the client host the transport passed to Subscribe.
+func (b *fakeBus) subscribeIP() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.ip
+}
+
 func (b *fakeBus) subscriber(t *testing.T) func([]byte) bool {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -99,6 +108,11 @@ func TestServeDeliversAndPublishes(t *testing.T) {
 	ctx, conn := dial(t, srv, "/room-1")
 
 	send := bus.subscriber(t)
+	// The subscription carries the client host, without its ephemeral port,
+	// which is what max_participants_per_ip counts.
+	if got := bus.subscribeIP(); got != "127.0.0.1" {
+		t.Errorf("Subscribe remote IP = %q, want 127.0.0.1", got)
+	}
 	if !send([]byte("hello")) {
 		t.Fatal("send reported failure")
 	}
@@ -121,6 +135,40 @@ func TestServeDeliversAndPublishes(t *testing.T) {
 	got := bus.publishedBodies()
 	if len(got) != 1 || string(got[0]) != "ping" {
 		t.Fatalf("published %q, want [ping]", got)
+	}
+}
+
+// hideHijacker exposes Unwrap but not http.Hijacker, the way Caddy's
+// response writers do. The handshake has to reach the hijack through the
+// unwrap chain.
+type hideHijacker struct {
+	http.ResponseWriter
+}
+
+func (w hideHijacker) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func TestServeAcceptsWriterThatHidesHijacker(t *testing.T) {
+	bus := &fakeBus{}
+	cfg := Config{
+		Subscribe: &hub.SubscribeSpec{Pattern: "room-*"},
+		Publish:   &hub.PublishSpec{Pattern: "room-*"},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		Serve(cfg, bus, hideHijacker{w}, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	ctx, conn := dial(t, srv, "/room-1")
+	send := bus.subscriber(t)
+	if !send([]byte("hello")) {
+		t.Fatal("send reported failure")
+	}
+	_, msg, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(msg) != "hello" {
+		t.Errorf("received %q, want hello", msg)
 	}
 }
 

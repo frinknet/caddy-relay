@@ -2,9 +2,8 @@
 
 This document describes the implementation file by file. It is maintained by
 hand and deliberately does not reproduce source code; read the files for exact
-signatures. Behaviour that is specified but not yet implemented lives in
-[`BACKLOG.md`](BACKLOG.md). Non-Go files (`Dockerfile`, `www/Caddyfile`,
-`build.sh`) and the test files are described in [`AGENTS.md`](AGENTS.md).
+signatures. Non-Go files (`Dockerfile`, `www/Caddyfile`, `build.sh`) and the
+test files are covered alongside their packages.
 
 ## Repository map
 
@@ -19,6 +18,7 @@ signatures. Behaviour that is specified but not yet implemented lives in
 | `pkg/hub/hub.go` | Channel registry, caps, memory budget and publish fan-out |
 | `pkg/hub/channel.go` | Channel actor: ring buffer, participant queues, replay, idle close and eviction |
 | `pkg/hub/subscribe.go` | Subscription error values |
+| `pkg/hub/net.go` | `ClientIP`: the client host used by per-IP limits |
 | `pkg/stun/stun.go` | Minimal STUN binding server |
 | `pkg/turn/turn.go` | TURN server wrapper: REST credentials, UDP, TLS and relay address generation |
 | `pkg/ws/ws.go` | WebSocket transport |
@@ -41,6 +41,8 @@ The global option accepts the following sub-directives:
 | `turn_relay_ports <lo>-<hi>` | Port range TURN allocates relays from |
 | `turn_external_ip <ip>` | Address advertised in relay allocations; required when TURN is enabled |
 | `turn_bind <addr>` | Local address relays bind to; empty means `0.0.0.0` |
+| `turn_max_allocations <n>` | Cap on concurrent relay allocations; `0` means unlimited |
+| `turn_auth_rate <n>` | Cap on authenticated requests per second per client IP; `0` means unlimited |
 | `channels { ... }` | Channel limits and per-pattern rules |
 
 ### `channels { ... }`
@@ -51,6 +53,8 @@ The block accepts global limits and any number of channel patterns:
   `1000`.
 - `max_participants <n>` caps subscribers across all channels; `0` means
   unlimited.
+- `max_participants_per_ip <n>` caps subscribers from one client address;
+  `0` means unlimited.
 - `max_memory <size>` sets a soft cap on retained ring bytes; `0` means
   unlimited. Sizes accept `K`, `M` and `G` suffixes (powers of 1024).
 - Any other token starts a channel rule block. The first rule whose pattern
@@ -110,14 +114,14 @@ and the transports.
   delay; `Retain` is how long the ring survives after the last message. All
   fields have JSON tags so the type can round-trip through the admin API.
 - `ChannelsConfig` is the full `channels {}` block: the rule slice plus
-  `MaxChannels`, `MaxParticipants` and `MaxMemory`.
+  `MaxChannels`, `MaxParticipants`, `MaxParticipantsPerIP` and `MaxMemory`.
 - `SubscribeSpec` and `PublishSpec` each carry one channel pattern.
 - `InterceptSpec` carries exactly one interception mode: a URL or a template
   source. `Compiled` is the parsed template and is populated at provision time;
   it is excluded from JSON. `IsZero` reports whether neither a URL nor a
   template is configured, which makes the intercept a pass-through.
 - `InterceptInfo` is the per-message context handed to intercepts: the channel
-  name, the remote address and the originating request. `Request` is typed as
+  name, the remote host and the originating request. `Request` is typed as
   `any` so the hub package does not import `net/http`.
 
 ## `pkg/hub/bus.go`
@@ -255,7 +259,16 @@ inbox, which are executed by one `run` goroutine.
 ## `pkg/hub/subscribe.go`
 
 Defines the subscription errors: per-channel participant cap reached, global
-`max_participants` reached, and channel closed.
+`max_participants` reached, `max_participants_per_ip` reached, and channel
+closed.
+
+## `pkg/hub/net.go`
+
+`ClientIP` turns a `host:port` client address into its host, which is what
+per-IP limits key on. An address without a port is returned unchanged and an
+empty address stays empty, meaning the client is unknown and no per-IP cap
+applies. Forwarding headers are deliberately not consulted: the address is the
+connection's peer.
 
 ## `pkg/stun/stun.go`
 
@@ -271,8 +284,8 @@ Malformed requests and build failures are silently skipped.
 ## `pkg/turn/turn.go`
 
 `Config` describes a TURN listener: listen address, realm, external IP, bind
-address, optional relay port range, the REST authentication secret and the TLS
-certificate pair.
+address, optional relay port range, the REST authentication secret, the TLS
+certificate pair, and the two abuse limits (`MaxAllocations`, `AuthRatePerIP`).
 
 - `Listen` requires `AuthSecret`, binds a UDP socket, validates
   `ExternalIP`, and creates a pion TURN server with
@@ -283,7 +296,21 @@ certificate pair.
   server with a listener config.
 - `newRelayGenerator` binds relays to `BindAddr` (default `0.0.0.0`) but
   advertises `ExternalIP`. It uses `RelayAddressGeneratorPortRange` when both
-  relay port bounds are set and valid, otherwise the static generator.
+  relay port bounds are set and valid, otherwise the static generator. With
+  `MaxAllocations` set the generator is wrapped in `cappedGenerator`.
+- `cappedGenerator` bounds live relays. pion asks the generator for one socket
+  per allocation and closes it when the allocation is released (or when an
+  even-port reservation is abandoned), so the wrapper counts sockets; past the
+  cap it returns `errAllocationCap`, which pion reports to the client. The
+  returned socket releases its slot once, on `Close`.
+- `newAuthHandler` wraps the REST auth handler in `ipLimiters` when
+  `AuthRatePerIP` is set: one token bucket per client host, created on first
+  use and dropped after ten idle minutes. A refused token fails
+  authentication. pion authenticates every request and offers no
+  allocation-level or username-aware hook in v4.0.0, so this bounds churn per
+  source rather than allocations per user.
+- `hostOf` reduces a client `net.Addr` to its host, so every port of one host
+  shares a limiter.
 - `splitNetworkAddr` splits `udp/:3478`, `udp/1.2.3.4:3478` and `:3478` into a
   network and address, defaulting the network to `udp`.
 
@@ -293,8 +320,11 @@ certificate pair.
 publish pattern, and the allowed origin patterns.
 
 `Serve` accepts the WebSocket handshake, applies the origin patterns, and takes
-the channel name from the last path segment. It rejects a channel outside the
-subscribe pattern and a missing publish target with a policy violation.
+the channel name from the last path segment. `upgradeWriter` follows the
+response writer's `Unwrap` chain to the first writer that implements
+`http.Hijacker`, because Caddy's wrappers expose hijacking only that way while
+`coder/websocket` asserts the interface directly. It rejects a channel outside
+the subscribe pattern and a missing publish target with a policy violation.
 
 The send callback writes text messages with a 10-second timeout and returns
 false once the connection has been marked closed. The handler subscribes, then
@@ -319,13 +349,15 @@ same trailing-`*` prefix rule as the hub.
 `Serve` dispatches `GET` to `serveGet`, `POST` to `servePost`, and returns 405
 for other methods.
 
-`serveGet` requires an `http.Flusher`, validates the channel against the
-subscribe pattern before writing any status, and creates a 64-slot handoff
-channel. Its send callback blocks on that channel or gives up when the request
-context ends. The handler subscribes *before* writing the 200 status, so a
-client that sees the response cannot miss a later publish and a subscription
-failure is a clean error status. Only the handler goroutine writes the
-`http.ResponseWriter`: it sends `data: <body>` frames and flushes them, and a
+`serveGet` verifies that the writer can flush by following its `Unwrap` chain
+(covering Caddy's wrappers, which expose `FlushError` rather than
+`http.Flusher`), validates the channel against the subscribe pattern before
+writing any status, and creates a 64-slot handoff channel. Its send callback
+blocks on that channel or gives up when the request context ends. The handler
+subscribes *before* writing the 200 status, so a client that sees the response
+cannot miss a later publish and a subscription failure is a clean error status.
+Only the handler goroutine writes the `http.ResponseWriter`: it sends
+`data: <body>` frames and flushes them through `http.ResponseController`, and a
 15-second ticker sends `: keepalive` comments.
 
 `servePost` reads at most 1 MiB, validates the channel, requires a publish
@@ -468,7 +500,7 @@ are middleware handlers.
 | Build | `go build ./...` |
 | Vet | `go vet ./...` |
 | Tests | `go test -race ./...` |
-| End to end against the built image | `./build.sh && tests/e2e/run.sh` |
+| End to end against the built image | `./build.sh && ./test/e2e.sh` |
 
 All of these run in CI (`.github/workflows/ci.yml`), which also builds the
 image. The end-to-end suite is a bash script that orchestrates the container
@@ -477,4 +509,5 @@ exercised from a real browser or behind a load balancer.
 
 ## Open items
 
-See [`BACKLOG.md`](BACKLOG.md) for the ranked list of outstanding work.
+Known gaps are tracked in local, untracked working notes rather than in the
+repository, so this document describes only what is implemented.

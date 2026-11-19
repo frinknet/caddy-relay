@@ -15,10 +15,12 @@ const DefaultQueueSize = 64
 // a stalled subscriber cannot flood the log.
 const dropLogInterval = 10 * time.Second
 
-// participant is one subscriber to a channel. id and send are only read from
-// the actor goroutine; the queue is drained by a dedicated writer goroutine.
+// participant is one subscriber to a channel. id, ip and send are only read
+// from the actor goroutine; the queue is drained by a dedicated writer
+// goroutine.
 type participant struct {
 	id    SubID
+	ip    string // client host, for max_participants_per_ip; may be empty
 	send  func([]byte) bool
 	queue chan []byte
 
@@ -171,7 +173,7 @@ func (c *Channel) run() {
 }
 
 // subscribe is called from Hub.Subscribe.
-func (c *Channel) subscribe(send func([]byte) bool) (*Subscription, error) {
+func (c *Channel) subscribe(remoteIP string, send func([]byte) bool) (*Subscription, error) {
 	type resp struct {
 		sub *Subscription
 		err error
@@ -184,14 +186,15 @@ func (c *Channel) subscribe(send func([]byte) bool) (*Subscription, error) {
 			out <- resp{err: errParticipantsCap}
 			return
 		}
-		if !c.hub.acquireParticipant() {
-			out <- resp{err: errMaxParticipantsCap}
+		if err := c.hub.acquireParticipant(remoteIP); err != nil {
+			out <- resp{err: err}
 			return
 		}
 		id := c.nextID
 		c.nextID++
 		p := &participant{
 			id:    id,
+			ip:    remoteIP,
 			send:  send,
 			queue: make(chan []byte, DefaultQueueSize),
 		}
@@ -265,7 +268,7 @@ func (c *Channel) removeParticipant(id SubID) {
 		return
 	}
 	delete(c.participants, id)
-	c.hub.releaseParticipant()
+	c.hub.releaseParticipant(p.ip)
 	close(p.queue)
 	if len(c.participants) == 0 {
 		c.lastPart = time.Now()

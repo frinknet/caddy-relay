@@ -26,9 +26,13 @@ const relayGlobalBlock = `
 		turn_secret test-shared-secret
 		turn_external_ip 203.0.113.1
 		turn_relay_ports 49152-65535
+		turn_max_allocations 64
+		turn_auth_rate 25
 		channels {
 			max_channels 2000
 			max_memory 256M
+			max_participants 5000
+			max_participants_per_ip 8
 			room-* {
 				messages 50
 				participants 100
@@ -110,9 +114,21 @@ func TestRelayOptionRegistersApp(t *testing.T) {
 		t.Errorf("turn relay ports = %d-%d", got.TurnRelayMin, got.TurnRelayMax)
 	}
 	if got.Channels.MaxChannels != 2000 {
+		if got.TurnMaxAllocations != 64 {
+			t.Errorf("TurnMaxAllocations = %d, want 64", got.TurnMaxAllocations)
+		}
+		if got.TurnAuthRate != 25 {
+			t.Errorf("TurnAuthRate = %d, want 25", got.TurnAuthRate)
+		}
 		t.Errorf("MaxChannels = %d", got.Channels.MaxChannels)
 	}
 	if got.Channels.MaxMemory != 256*1024*1024 {
+		if got.Channels.MaxParticipants != 5000 {
+			t.Errorf("MaxParticipants = %d, want 5000", got.Channels.MaxParticipants)
+		}
+		if got.Channels.MaxParticipantsPerIP != 8 {
+			t.Errorf("MaxParticipantsPerIP = %d, want 8", got.Channels.MaxParticipantsPerIP)
+		}
 		t.Errorf("MaxMemory = %d", got.Channels.MaxMemory)
 	}
 	if len(got.Channels.Rules) != 1 {
@@ -395,6 +411,21 @@ func TestAdapterErrorPaths(t *testing.T) {
 			"bad port range",
 			"{\n\trelay {\n\t\tturn_relay_ports nonsense\n\t}\n}\n",
 			"turn_relay_ports",
+		},
+		{
+			"negative allocation cap",
+			"{\n\trelay {\n\t\tturn_max_allocations -1\n\t}\n}\n",
+			"turn_max_allocations",
+		},
+		{
+			"bad auth rate",
+			"{\n\trelay {\n\t\tturn_auth_rate fast\n\t}\n}\n",
+			"turn_auth_rate",
+		},
+		{
+			"negative per-IP participant cap",
+			"{\n\trelay {\n\t\tchannels {\n\t\t\tmax_participants_per_ip -2\n\t\t}\n\t}\n}\n",
+			"max_participants_per_ip",
 		},
 		{
 			"turn without a secret",

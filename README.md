@@ -10,10 +10,9 @@ App module ID: `relay` (Caddy's JSON app key is also `relay`). Source:
 
 ## Build
 
-    go vet ./...
-    go test -race ./...            # unit and transport tests
+    sh test/unit.sh                # gofmt, vet, unit and transport tests
     ./build.sh                     # the only supported way to build the image
-    tests/e2e/run.sh               # runs the image and drives it over published ports
+    ./test/e2e.sh                 # runs the image and drives it over published ports
     docker run --rm -p 80:80 -p 443:443 -p 3478:3478/udp caddy-relay:test
 
 `build.sh` is the supported build entry point: it derives the image name from
@@ -21,10 +20,10 @@ the repo directory (here `caddy-relay:test`) and refreshes any old image, so
 `docker build` is not needed and not what the tests expect. `--init` is for
 scaffolding a brand-new plugin, not for building this one.
 
-The image runs `/etc/caddy/Caddyfile` (mount a replacement over it to change
-the config) and its `HEALTHCHECK` polls the admin endpoint on the default
-`localhost:2019`, so a config that sets `admin off` or moves it will report
-unhealthy.
+The image runs the `Caddyfile` in `/srv/www`, its working directory (mount a
+replacement over `/srv/www/Caddyfile` to change the config), and its
+`HEALTHCHECK` polls the admin endpoint on the default `localhost:2019`, so a
+config that sets `admin off` or moves it will report unhealthy.
 
 ## How a request maps to a channel
 
@@ -53,10 +52,13 @@ rejected.
             turn_external_ip 203.0.113.1
             turn_bind 0.0.0.0
             turn_relay_ports 49152-65535
+            turn_max_allocations 1024
+            turn_auth_rate 50
 
             channels {
                 max_channels     2000
                 max_participants 10000
+                max_participants_per_ip 50
                 max_memory       256M
 
                 room-* {
@@ -86,12 +88,15 @@ rejected.
 | `turn_external_ip <ip>` | Public IP advertised in TURN relay addresses. Required for `turn`/`turn_tls` |
 | `turn_bind <addr>` | Local address relays bind to (default `0.0.0.0`). Separate from the advertised IP so containers and NAT work |
 | `turn_relay_ports LO-HI` | Port range TURN allocates relays from (default: any free port) |
+| `turn_max_allocations N` | Cap on concurrent TURN relays (default: unlimited). Each relay can carry any amount of traffic, so this is the TURN connection limit |
+| `turn_auth_rate N` | Cap on authenticated TURN requests per second from one client IP (default: unlimited). Bounds how fast a source can create allocations, permissions and channel bindings |
 
 ### `channels { ... }`
 
 `max_channels` (default 1000) caps live channel count, `max_participants`
-caps subscribers across all channels (default: unlimited), and `max_memory`
-caps total retained bytes (default: unlimited) — see *Limits* below. Every
+caps subscribers across all channels, `max_participants_per_ip` caps them per
+client address, and `max_memory` caps total retained bytes (all three default
+to unlimited) — see *Limits* below. Every
 other entry is a **pattern** with wildcard suffix `*` only — `room-*` matches
 `room-1`, not `other-room`. The first matching rule wins.
 
@@ -114,6 +119,10 @@ syntax (`100ms`, `5m`). Numbers must be plain integers.
   enough the message is dropped (and reported, see *Dropped messages*).
 - **`max_participants`** is exact: once it is reached, further subscriptions
   are rejected with `participants cap reached`.
+- **`max_participants_per_ip`** is exact per client host: a subscription over
+  the limit for that address is rejected with `max_participants_per_ip
+  reached`, while other addresses are unaffected. The address comes from the
+  connection, not from a header, so a proxy in front has to be trusted.
 - **`rate_limit`** is per connection and comes from the channel's resolved
   rule. A client that sends more than 16 messages while over its limit is
   disconnected with a policy-violation close code.
@@ -204,7 +213,7 @@ the sender, a `publish` from a template includes them.
 | `message` | Raw message body as a string |
 | `data` | Parsed JSON body, or an empty map |
 | `channel` | Channel name |
-| `remote_ip` | Subscriber's remote address |
+| `remote_ip` | Subscriber's client host, without the port |
 | `request` | The original `*http.Request` |
 | `dict k v ...` | Map built from key/value pairs |
 | `set m k v` | Map with `k` set to `v` |
@@ -231,7 +240,7 @@ application so the secret never reaches the browser:
 addresses), and `turn_relay_ports` confines allocations to a range you can
 open in the firewall. `turn_tls` listens with TLS over TCP using
 `turn_tls_cert`/`turn_tls_key`; supplying the pair as files keeps certificate
-management outside Caddy for now (see `BACKLOG.md`).
+management outside Caddy for now.
 
 ## Clients
 
@@ -249,15 +258,15 @@ fetch("https://example.com/events/room-1", { method: "POST", body: "hello" })
 
 ## Docs and status
 
-`go test -race ./...` covers the hub, both transports, STUN, TURN and the
-Caddyfile adapter. `tests/e2e/run.sh` is the end-to-end suite: it renders
-`tests/e2e/Caddyfile`, runs the built image with Docker, waits for the image's
+`sh test/unit.sh` covers the hub, both transports, STUN, TURN and the
+Caddyfile adapter. `test/e2e.sh` is the end-to-end suite: it renders
+`test/Caddyfile`, runs the built image with Docker, waits for the image's
 own healthcheck, and then drives the container over published ports (HTTP and
 HTTPS sites, SSE publish/intercept/replay, the channel allow-list, the
 WebSocket handshake and origin policy, a STUN binding request, and the
 TURN-over-TLS listener). It needs Docker and the image:
 
-    ./build.sh && tests/e2e/run.sh
+    ./build.sh && ./test/e2e.sh
 
 CI runs all of it, including the image build. The plugin has not been run
 against real browsers or behind a load balancer.
@@ -270,6 +279,4 @@ ports `www/Caddyfile` uses when its commented-out TURN block is enabled. TURN
 is off there by default, and the relay port range must be published by the
 caller.
 
-- `AGENTS.md` — architecture, lifecycle, and gotchas
 - `spec.md` — file-by-file implementation notes, maintained by hand
-- `BACKLOG.md` — open work
