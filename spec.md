@@ -477,6 +477,10 @@ registers stub implementations of every template function, parses with
 `missingkey=zero`, and stores both the source and the compiled template in the
 `InterceptSpec`.
 
+Rendering clones the compiled template and binds the per-message functions on
+the clone, because the clone is what mutates under `Funcs`; the shared tree
+keeps only the stubs, so concurrent messages cannot trade bindings.
+
 ### Helpers and guards
 
 `atoi` is a plain integer parse. `parseBytes` accepts a `K`, `M` or `G` suffix

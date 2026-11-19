@@ -1,6 +1,8 @@
 package app
 
 import (
+	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -16,6 +18,7 @@ import (
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig"
 	"github.com/caddyserver/certmagic"
+	"go.uber.org/zap"
 
 	"github.com/frinknet/caddy-relay/pkg/hub"
 )
@@ -611,6 +614,52 @@ func TestResolveInterceptURL(t *testing.T) {
 				t.Errorf("resolved %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// One InterceptSpec serves every message on a channel, so a render must not
+// leave its per-message funcs bound to the shared template: concurrent
+// renders would then read another message's body, channel or client address.
+func TestInterceptTemplateLeavesCompiledSpecUntouched(t *testing.T) {
+	spec, err := compileIntercept("tmpl:{{ message }}|{{ channel }}|{{ remote_ip }}")
+	if err != nil {
+		t.Fatalf("compileIntercept: %v", err)
+	}
+	r := &Relay{log: zap.NewNop()}
+	info := hub.InterceptInfo{Channel: "room-1", RemoteIP: "203.0.113.9"}
+	out, ok := r.interceptTemplate(context.Background(), spec, []byte("hello"), info)
+	if !ok || string(out) != "hello|room-1|203.0.113.9" {
+		t.Fatalf("render = %q, ok = %v", out, ok)
+	}
+
+	// The shared tree still holds the provision-time stubs, so rendering it
+	// directly gives empty values rather than the message just rendered.
+	shared, err := spec.Compiled.Clone()
+	if err != nil {
+		t.Fatalf("clone compiled spec: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := shared.Execute(&buf, nil); err != nil {
+		t.Fatalf("execute compiled spec: %v", err)
+	}
+	if got := buf.String(); got != "||" {
+		t.Errorf("compiled spec rendered %q, want the empty stubs", got)
+	}
+}
+
+func BenchmarkInterceptTemplate(b *testing.B) {
+	spec, err := compileIntercept(`tmpl:{"text":{{ message }}}`)
+	if err != nil {
+		b.Fatalf("compileIntercept: %v", err)
+	}
+	r := &Relay{log: zap.NewNop()}
+	body := []byte(`{"text":"hello"}`)
+	info := hub.InterceptInfo{Channel: "room-1", RemoteIP: "203.0.113.9"}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, ok := r.interceptTemplate(context.Background(), spec, body, info); !ok {
+			b.Fatal("render failed")
+		}
 	}
 }
 

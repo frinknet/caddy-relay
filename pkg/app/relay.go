@@ -605,13 +605,14 @@ func (r *Relay) interceptTemplate(ctx context.Context, spec *hub.InterceptSpec, 
 		return r.hub.Publish(ctx, pats, raw, 0) // 0 = include all
 	}
 
-	t := spec.Compiled.Funcs(funcs)
-	// Re-parse so the funcs are registered; spec.Compiled is the source tree.
-	parsed2, err := t.Clone()
+	// Clone before binding the per-message funcs: Funcs mutates the template
+	// it is called on, and spec.Compiled is shared by every message, so
+	// binding first would let concurrent renders swap each other's closures.
+	t, err := spec.Compiled.Clone()
 	if err != nil {
 		return nil, false
 	}
-	if err := parsed2.Execute(&buf, nil); err != nil {
+	if err := t.Funcs(funcs).Execute(&buf, nil); err != nil {
 		r.log.Warn("template execute", zap.Error(err))
 		return nil, false
 	}
