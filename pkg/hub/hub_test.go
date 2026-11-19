@@ -296,6 +296,77 @@ func TestStalledSubscriberDoesNotBlockPublish(t *testing.T) {
 	}
 }
 
+// Many subscribers on one channel must not delay each other. A stalled
+// subscriber blocks in its send callback, so its queue overflows and drops,
+// while every fast subscriber still receives each message in order.
+func TestManySubscribersKeepUpWithAStalledPeer(t *testing.T) {
+	const (
+		fast     = 64
+		batch    = 16
+		messages = 128
+	)
+	h := NewHub(ChannelsConfig{Rules: []*ChannelRule{{
+		Pattern: "lobby", Messages: 10, Participants: fast + 1, IdleTTL: time.Minute,
+	}}})
+	ctx := context.Background()
+
+	sinks := make([]*sink, fast)
+	for i := range sinks {
+		sinks[i] = &sink{}
+		if _, err := h.Subscribe(ctx, "lobby", "", sinks[i].send); err != nil {
+			t.Fatalf("subscribe fast reader %d: %v", i, err)
+		}
+	}
+
+	release := make(chan struct{})
+	stalled, err := h.Subscribe(ctx, "lobby", "", func([]byte) bool {
+		<-release
+		return true
+	})
+	if err != nil {
+		t.Fatalf("subscribe stalled reader: %v", err)
+	}
+	defer func() {
+		close(release)
+		stalled.Cancel()
+	}()
+
+	start := time.Now()
+	dropped := 0
+	for i := 0; i < messages; i++ {
+		res := h.Publish(ctx, []string{"lobby"}, []byte(fmt.Sprintf("msg-%d", i)), 0)
+		if !res.Enqueued("lobby") {
+			t.Fatalf("publish %d was not enqueued: %+v", i, res["lobby"])
+		}
+		dropped += res.Dropped()
+		if i%batch == batch-1 {
+			for j, s := range sinks {
+				if got := s.wait(i+1, 2*time.Second); len(got) != i+1 {
+					t.Fatalf("fast reader %d has %d messages after publish %d, want %d",
+						j, len(got), i, i+1)
+				}
+			}
+		}
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("publishing %d messages to %d subscribers took %v", messages, fast, elapsed)
+	}
+	if dropped == 0 {
+		t.Error("the stalled subscriber dropped nothing; its queue should have overflowed")
+	}
+	for i, s := range sinks {
+		got := s.wait(messages, 5*time.Second)
+		if len(got) != messages {
+			t.Fatalf("fast reader %d has %d messages, want %d", i, len(got), messages)
+		}
+		for n, body := range got {
+			if want := fmt.Sprintf("msg-%d", n); body != want {
+				t.Fatalf("fast reader %d message %d = %q, want %q", i, n, body, want)
+			}
+		}
+	}
+}
+
 // A publish reports per channel whether the message was enqueued and why it
 // was not, so a caller can react without reading the log.
 func TestPublishResultReportsStatus(t *testing.T) {

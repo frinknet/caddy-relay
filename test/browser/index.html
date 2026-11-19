@@ -1,0 +1,88 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>caddy-relay browser check</title>
+</head>
+<body>
+<pre id="result">RUNNING</pre>
+<script>
+(() => {
+  const result = document.getElementById("result");
+  const finish = (ok, text) => {
+    result.textContent = (ok ? "PASS " : "FAIL ") + text;
+    document.documentElement.dataset.done = ok ? "1" : "0";
+  };
+  const fail = (err) => finish(false, err && err.message ? err.message : String(err));
+  const guard = setTimeout(() => fail(new Error("browser check timed out")), 15000);
+  const nonce = Date.now() + "-" + Math.random().toString(36).slice(2);
+  const wsURL = (channel) =>
+    (location.protocol === "https:" ? "wss://" : "ws://") +
+    location.host + "/ws/" + channel;
+  const sseURL = (channel) => "/events/" + channel;
+  const deadline = (ms, promise) => Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("timed out")), ms)),
+  ]);
+  const open = (url) => new Promise((resolve, reject) => {
+    const ws = new WebSocket(url);
+    ws.onopen = () => resolve(ws);
+    ws.onerror = () => reject(new Error("websocket failed to open"));
+  });
+  const message = (ws, ms) => deadline(ms, new Promise((resolve, reject) => {
+    ws.onmessage = (event) => resolve(event.data);
+    ws.onclose = (event) => reject(new Error("websocket closed " + event.code));
+  }));
+  const event = (source, ms) => deadline(ms, new Promise((resolve, reject) => {
+    source.onmessage = (e) => resolve(e.data);
+    source.onerror = () => reject(new Error("eventsource failed"));
+  }));
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  async function run() {
+    const channel = "room-browser-" + nonce;
+    const reader = await open(wsURL(channel));
+    const writer = await open(wsURL(channel));
+    let echo = "none";
+    writer.onmessage = (e) => { echo = e.data; };
+    const payload = JSON.stringify({ text: "browser-" + nonce });
+    const incoming = message(reader, 5000);
+    writer.send(payload);
+    if (await incoming !== payload) {
+      throw new Error("websocket payload mismatch");
+    }
+    await sleep(750);
+    if (echo !== "none") {
+      throw new Error("the writer received its own message");
+    }
+    reader.close();
+    writer.close();
+
+    const eventsChannel = "room-browser-sse-" + nonce;
+    const source = new EventSource(sseURL(eventsChannel));
+    await deadline(5000, new Promise((resolve, reject) => {
+      source.onopen = () => resolve();
+      source.onerror = () => reject(new Error("eventsource failed to open"));
+    }));
+    const published = event(source, 5000);
+    const response = await fetch(sseURL(eventsChannel), {
+      method: "POST",
+      body: "browser",
+    });
+    if (response.status !== 202) {
+      throw new Error("eventsource publish returned " + response.status);
+    }
+    if (await published !== '{"intercepted":true}') {
+      throw new Error("eventsource payload mismatch");
+    }
+    source.close();
+  }
+
+  run().then(() => {
+    clearTimeout(guard);
+    finish(true, "websocket+eventsource");
+  }, fail);
+})();
+</script>
+</body>
+</html>

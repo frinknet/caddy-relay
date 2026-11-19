@@ -23,6 +23,8 @@ test files are covered alongside their packages.
 | `pkg/turn/turn.go` | TURN server wrapper: REST credentials, UDP, TLS and relay address generation |
 | `pkg/ws/ws.go` | WebSocket transport |
 | `pkg/sse/sse.go` | Server-Sent Events transport |
+| `test/browser/index.html` | Browser fixture driven by the optional Chromium check |
+| `test/client/*.go` | Go protocol client, load check and Chromium driver run against the fixture container |
 
 ## Configuration surface
 
@@ -513,6 +515,43 @@ are middleware handlers.
 - The WebSocket rate limit comes from the channel rule and closes a client
   that stays over it.
 
+## `build.sh`
+
+`build.sh` is the only supported image build entry point. It reads the first
+three lines of `NOTICE` to derive the repo origin, copyright line and license,
+rewrites `NOTICE`, substitutes the repo origin in `Dockerfile` and `go.mod`,
+and removes stale `REPOSLUG`/`SLUG` images before running
+`docker build -t "${SLUG}:test" .`. The tag is the repo slug, so this checkout
+builds `caddy-relay:test`. `--init` is scaffolding for a brand-new plugin: it
+creates the root Go file and `pkg/`/`www/`, prompts for license, copyright and
+repo name, and skips the image build. The plugin itself is built without it.
+
+## `Dockerfile`
+
+Three stages. Stage A (`caddy:2.11.9-builder-alpine`) downloads the toybox
+binary for `TARGETARCH` (amd64 maps to `x86_64`, arm64 to `aarch64`) with its
+license, plus CA certificates and tzdata. Stage B copies `go.mod`/`go.sum`,
+downloads modules through the `gomod` cache mount, copies the tree, runs
+`go mod tidy`, and builds Caddy with
+`xcaddy --with github.com/frinknet/caddy-relay --replace ...=/src` into
+`/out/caddy`; it then collects Caddy's license and the license/notice files of
+every linked module from `go version -m` and the module cache. Stage C is
+`FROM scratch`: it copies the licenses, certificates, zoneinfo, Caddy binary,
+toybox and `www/`, then populates `/bin` with toybox symlinks and creates the
+XDG directories. The `HEALTHCHECK` speaks raw HTTP to the admin endpoint with
+`toybox nc`, including the port because the endpoint checks `Host` exactly.
+`WORKDIR`/`CMD` make `/srv/www/Caddyfile` the adjacent config. `upx` is
+deliberately absent: it strips the Go build info the license collection reads.
+
+## `www/Caddyfile`
+
+The config shipped at `/srv/www/Caddyfile`. It enables STUN on `udp/:3478`,
+leaves TURN commented out (it needs a secret and an external IP), and defines
+`room-*` and `lobby` channel rules. The `example.com` site routes WebSocket
+upgrades to `relay_ws`, `/events*` to `relay_sse` with a template intercept
+that publishes and renders nothing, and everything else to `file_server`.
+The adapter tests adapt and validate this file.
+
 ## Verification
 
 | Check | Command |
@@ -521,13 +560,20 @@ are middleware handlers.
 | Vet | `go vet ./...` |
 | Tests | `go test -race ./...` |
 | End to end against the built image | `./build.sh && ./test/e2e.sh` |
+| Browser end to end (opt-in, ~200 MiB package) | `CADDY_RELAY_BROWSER=1 ./test/e2e.sh` |
 
 All of these run in CI (`.github/workflows/ci.yml`), which also builds the
 image. The end-to-end suite is a bash script that orchestrates the container
 and checks it with `curl`, `openssl` and a raw STUN datagram; it then runs the
 Go protocol client in `test/client` in the builder image sharing the fixture's
-network namespace, which exchanges WebSocket frames and allocates a TURN relay.
-Nothing has been exercised from a real browser or behind a load balancer.
+network namespace, which exchanges WebSocket frames, holds 40 WebSocket
+readers on one channel while a stalled reader is ignored and 100 messages are
+published over SSE, and allocates a TURN relay. With
+`CADDY_RELAY_BROWSER=1` it also launches the headless Chromium shell from the
+builder image, navigates to the fixture page, and polls the page's `data-done`
+marker over the DevTools protocol, so the browser `WebSocket` and
+`EventSource` APIs are exercised rather than only the Go clients. The plugin
+has not been run behind a load balancer.
 
 ## Open items
 

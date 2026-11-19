@@ -290,16 +290,23 @@ HTTPS sites, SSE publish/intercept/replay, the channel allow-list, the
 WebSocket handshake and origin policy, a STUN binding request, and the
 TURN-over-TLS listener). It then runs the Go protocol client in `test/client`
 inside the builder image, sharing the fixture's network namespace, to exchange
-WebSocket frames and allocate a TURN relay whose port must come from
-`turn_relay_ports` and carry a relayed STUN request. It needs Docker, the
-image, and the builder image (`CADDY_RELAY_BUILDER_IMAGE`, default
-`caddy:2.11.9-builder-alpine`). The client checks are skipped by the unit
-layer.
+WebSocket frames, hold 40 WebSocket readers on one channel while a 41st stops
+reading as 100 messages are published over SSE, and allocate a TURN relay
+whose port must come from `turn_relay_ports` and carry a relayed STUN request. It needs Docker, the image, and the builder image
+(`CADDY_RELAY_BUILDER_IMAGE`, default `caddy:2.11.9-builder-alpine`). The
+client checks are skipped by the unit layer.
+
+Set `CADDY_RELAY_BROWSER=1` to add the browser check: the Go client installs
+a headless Chromium in the builder image, navigates to the fixture page
+(`test/browser`), and waits over the DevTools protocol for the page's own
+WebSocket and EventSource checks to report. It installs a ~200 MiB browser
+package, so it is opt-in locally; CI always sets it.
 
     ./build.sh && ./test/e2e.sh
+    CADDY_RELAY_BROWSER=1 ./test/e2e.sh   # add the browser check
 
-CI runs all of it, including the image build. The plugin has not been run
-against real browsers or behind a load balancer.
+CI runs all of it, including the image build and the browser check. The plugin
+has not been run behind a load balancer.
 
 The global `relay` option registers the app as `apps.relay`, so the hub and
 the STUN/TURN listeners start even in a config with no `relay_ws`/`relay_sse`

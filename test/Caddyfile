@@ -100,6 +100,13 @@ http://:{{HTTP_PORT}} {
 		respond `{"intercepted":true}`
 	}
 
+	# Browser fixtures: a real browser drives WebSocket and EventSource.
+	# test/e2e.sh mounts test/browser here when the browser check is enabled.
+	handle_path /browser/* {
+		root * /srv/browser
+		file_server
+	}
+
 	# Readiness probe for the test.
 	handle {
 		respond "caddy-relay e2e"

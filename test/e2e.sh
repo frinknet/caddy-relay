@@ -17,8 +17,10 @@
 #   - the WebSocket handshake, including the origin policy
 #   - a STUN binding request over UDP
 #   - the TURN-over-TLS listener and its certificate
-#   - WebSocket frame exchange and a TURN allocation, driven by the Go client
-#     in test/client
+#   - WebSocket frame exchange, a load test and a TURN allocation, driven by
+#     the Go client in test/client
+#   - a real browser driving WebSocket and EventSource, with
+#     CADDY_RELAY_BROWSER=1
 #
 # The Go client needs a protocol stack, so it runs in the builder image while
 # sharing the fixture container's network namespace. The unit layer skips it
@@ -27,6 +29,7 @@
 # Usage:
 #   ./test/e2e.sh
 #   CADDY_RELAY_IMAGE=caddy-relay:my-tag ./test/e2e.sh
+#   CADDY_RELAY_BROWSER=1 ./test/e2e.sh   # add the Chromium check
 #   KEEP=1 ./test/e2e.sh     # leave the container running for inspection
 set -euo pipefail
 
@@ -128,6 +131,7 @@ start_container() {
       -p "127.0.0.1:${turn_port}:${turn_port}/udp" \
       -p "127.0.0.1:${turn_tls_port}:${turn_tls_port}/tcp" \
       -v "$tmp/Caddyfile:/srv/www/Caddyfile:ro" \
+      -v "$here/browser:/srv/browser:ro" \
       "$image" 2>/dev/null); then
       return 0
     fi
@@ -258,12 +262,23 @@ done
 [ "$served" = 1 ] || fail "TURN over TLS did not serve a certificate from Caddy's cache"
 pass "turn over tls listener from certmagic"
 
-# Protocol clients. WebSocket frames and TURN allocations need a real client,
-# so test/client runs in the builder image, sharing this container's network
-# namespace: it reaches every fixture listener on 127.0.0.1 without publishing
-# more ports, including the TURN relay range.
+# Protocol clients. WebSocket frames, the load test and TURN allocations need a
+# real client, so test/client runs in the builder image, sharing this
+# container's network namespace: it reaches every fixture listener on
+# 127.0.0.1 without publishing more ports, including the TURN relay range.
+# The browser check is part of the same Go test: when CADDY_RELAY_BROWSER=1 the
+# container also installs a headless Chromium (about 200 MiB) and the test
+# drives the fixture page over the DevTools protocol. CI sets the variable.
 repo=$(cd "$here/.." && pwd)
-timeout 180s docker run --rm --network "container:$container" \
+client_prefix=
+client_timeout=180s
+test_timeout=90s
+if [ "${CADDY_RELAY_BROWSER:-0}" = 1 ]; then
+  client_prefix='apk add --no-cache chromium-headless-shell >/dev/null && '
+  client_timeout=300s
+  test_timeout=150s
+fi
+timeout "$client_timeout" docker run --rm --network "container:$container" \
   -v "$repo":/src \
   -v caddy-sf-mod:/mod \
   -w /src \
@@ -274,8 +289,12 @@ timeout 180s docker run --rm --network "container:$container" \
   -e "CADDY_RELAY_E2E_TURN_SECRET=$turn_secret" \
   -e "CADDY_RELAY_E2E_RELAY_MIN=$relay_min" \
   -e "CADDY_RELAY_E2E_RELAY_MAX=$relay_max" \
-  "$builder" go test -count=1 -timeout=90s -run TestContainer ./test/client ||
+  -e "CADDY_RELAY_BROWSER=${CADDY_RELAY_BROWSER:-0}" \
+  "$builder" sh -c "${client_prefix}go test -count=1 -timeout=${test_timeout} -run TestContainer ./test/client" ||
   fail "the protocol client checks failed"
-pass "websocket frames and turn allocation"
+pass "websocket frames, load, and turn allocation"
+if [ "${CADDY_RELAY_BROWSER:-0}" = 1 ]; then
+  pass "browser websocket and eventsource"
+fi
 
 printf '\nall container checks passed\n'

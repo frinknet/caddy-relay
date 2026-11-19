@@ -10,11 +10,13 @@ package client_test
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,6 +39,14 @@ func TestContainer(t *testing.T) {
 	t.Run("websocket rejected channel", func(t *testing.T) {
 		testWebSocketRejectedChannel(t, base)
 	})
+	t.Run("channel load", func(t *testing.T) {
+		testChannelLoad(t, base)
+	})
+	if os.Getenv("CADDY_RELAY_BROWSER") == "1" {
+		t.Run("browser", func(t *testing.T) {
+			testBrowser(t, base)
+		})
+	}
 	t.Run("turn allocation", func(t *testing.T) {
 		testTURNAllocation(t)
 	})
@@ -104,6 +114,87 @@ func testWebSocketRejectedChannel(t *testing.T, base string) {
 	}
 	if got := websocket.CloseStatus(err); got != websocket.StatusPolicyViolation {
 		t.Fatalf("close status = %v, want %v (error %v)", got, websocket.StatusPolicyViolation, err)
+	}
+}
+
+// testChannelLoad holds many WebSocket subscribers on one channel while one
+// of them stops reading. Messages are published through the SSE endpoint,
+// which has no per-connection inbound rate limit, so this exercises the
+// fan-out rather than the WebSocket limiter. Every reader that keeps reading
+// must receive the whole stream, and the stalled connection must not slow the
+// publisher or the others down.
+func testChannelLoad(t *testing.T, base string) {
+	const (
+		readers  = 40
+		messages = 100
+	)
+	channel := fmt.Sprintf("room-load-%d", time.Now().UnixNano())
+	wsURL := "ws" + strings.TrimPrefix(base, "http") + "/ws/" + channel
+	sseURL := base + "/events/" + channel
+	origin := base
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	conns := make([]*websocket.Conn, readers)
+	for i := range conns {
+		conns[i] = dial(t, ctx, wsURL, origin)
+		defer conns[i].Close(websocket.StatusNormalClosure, "")
+	}
+	stalled := dial(t, ctx, wsURL, origin)
+	defer stalled.Close(websocket.StatusNormalClosure, "")
+
+	const want = `{"intercepted":true}`
+	errs := make(chan error, readers)
+	var wg sync.WaitGroup
+	for i, conn := range conns {
+		wg.Add(1)
+		go func(i int, conn *websocket.Conn) {
+			defer wg.Done()
+			for n := 0; n < messages; n++ {
+				rctx, rcancel := context.WithTimeout(ctx, 20*time.Second)
+				typ, got, err := conn.Read(rctx)
+				rcancel()
+				if err != nil {
+					errs <- fmt.Errorf("reader %d after %d messages: %w", i, n, err)
+					return
+				}
+				if typ != websocket.MessageText {
+					errs <- fmt.Errorf("reader %d message %d type = %v, want text", i, n, typ)
+					return
+				}
+				if string(got) != want {
+					errs <- fmt.Errorf("reader %d message %d = %q, want %q", i, n, got, want)
+					return
+				}
+			}
+		}(i, conn)
+	}
+
+	start := time.Now()
+	for n := 0; n < messages; n++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, sseURL,
+			strings.NewReader(fmt.Sprintf("load-%d", n)))
+		if err != nil {
+			t.Fatalf("publish %d: %v", n, err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("publish %d: %v", n, err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusAccepted {
+			t.Fatalf("publish %d returned %d, want %d", n, resp.StatusCode, http.StatusAccepted)
+		}
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("publishing %d messages to %d readers took %v", messages, readers, elapsed)
 	}
 }
 
